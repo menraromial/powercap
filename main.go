@@ -29,31 +29,48 @@ const (
 	maxSource                  = 200000000.0
 )
 
+func init() {
+	// Set log output format to include date and time
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+}
+
 func getKubeClient() (*kubernetes.Clientset, error) {
+	log.Println("Attempting to get in-cluster config")
 	config, err := rest.InClusterConfig()
 	if err != nil {
+		log.Printf("Error getting in-cluster config: %v", err)
 		return nil, fmt.Errorf("error getting in-cluster config: %w", err)
 	}
+
+	log.Println("Attempting to create Kubernetes clientset")
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
+		log.Printf("Error creating Kubernetes clientset: %v", err)
 		return nil, fmt.Errorf("error creating kubernetes clientset: %w", err)
 	}
+	log.Println("Successfully created Kubernetes clientset")
+
 	return clientset, nil
 }
 
 func getNodeName() (string, error) {
 	nodeName := os.Getenv(nodeEnv)
 	if nodeName == "" {
+		log.Println("NODE_NAME environment variable is not set")
 		return "", fmt.Errorf("no node name found in environment variable %s", nodeEnv)
 	}
+	log.Printf("NODE_NAME environment variable is set to %s", nodeName)
 	return nodeName, nil
 }
 
 func getNode(clientset *kubernetes.Clientset, nodeName string) (*v1.Node, error) {
+	log.Printf("Attempting to get node %s", nodeName)
 	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 	if err != nil {
+		log.Printf("Error getting node %s: %v", nodeName, err)
 		return nil, fmt.Errorf("error getting node %s: %w", nodeName, err)
 	}
+	log.Printf("Successfully retrieved node %s", nodeName)
 	return node, nil
 }
 
@@ -79,8 +96,10 @@ func getPowerLimits() (string, string, string, string) {
 	for i, filePath := range constraints {
 		limit, err := readPowerLimit(filePath)
 		if err != nil {
+			log.Printf("Error reading power limit from %s: %v", filePath, err)
 			limits[i] = "0"
 		} else {
+			log.Printf("Successfully read power limit from %s: %s", filePath, limit)
 			limits[i] = limit
 		}
 	}
@@ -92,6 +111,7 @@ func readPowerLimit(filePath string) (string, error) {
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		log.Printf("Failed to read file %s: %v", filePath, err)
 		return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
 	}
 	return strings.TrimSpace(string(data)), nil
@@ -122,6 +142,7 @@ func initNodePowerLimits(clientset *kubernetes.Clientset,
 
 	node, err := getNode(clientset, nodeName)
 	if err != nil {
+		log.Printf("Error retrieving node %s: %v", nodeName, err)
 		return err
 	}
 	if node.Labels == nil {
@@ -148,6 +169,7 @@ func initNodePowerLimits(clientset *kubernetes.Clientset,
 
 	_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
 	if err != nil {
+		log.Printf("Error updating node %s: %v", nodeName, err)
 		return fmt.Errorf("error updating node %s: %w", nodeName, err)
 	}
 	return nil
@@ -161,6 +183,7 @@ func getNodeLabelValue(clientset *kubernetes.Clientset, nodeName, label string) 
 
 	value, ok := node.Labels[label]
 	if !ok || value == "" {
+		log.Printf("Label %s not found on node %s", label, nodeName)
 		return "", fmt.Errorf("label %s not found on node %s", label, nodeName)
 	}
 	return strings.TrimSpace(value), nil
@@ -178,6 +201,7 @@ func getSourcePower() (int64, error) {
 
 	// Échelle de la distribution exponentielle pour qu'elle corresponde aux bornes spécifiées
 	scaledExpRandom := minSource + (maxSource-minSource)*(1-math.Exp(-lambda*expRandom))
+	log.Printf("Generated source power: %d", int64(math.Round(scaledExpRandom)))
 
 	return int64(math.Round(scaledExpRandom)), nil
 }
@@ -196,6 +220,7 @@ func getSourcePower() (int64, error) {
 func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 	node, err := getNode(clientset, nodeName)
 	if err != nil {
+		log.Printf("Error retrieving node %s: %v", nodeName, err)
 		return err
 	}
 
@@ -210,16 +235,19 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 	for i, label := range labels {
 		value, err := getNodeLabelValue(clientset, nodeName, label)
 		if err != nil {
+			log.Printf("Error getting node label value for %s: %v", label, err)
 			return err
 		}
 		powerLimits[i], err = strconv.ParseInt(value, 10, 64)
 		if err != nil {
+			log.Printf("Error parsing power limit for label %s: %v", label, err)
 			return fmt.Errorf("error parsing power limit for label %s: %w", label, err)
 		}
 	}
 
 	sourcePower, err := getSourcePower()
 	if err != nil || sourcePower == 0 {
+		log.Printf("Error getting source power for node %s: %v", nodeName, err)
 		return fmt.Errorf("source power not found for node %s", nodeName)
 	}
 
@@ -237,11 +265,14 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 				err = os.WriteFile(filePath, []byte(strconv.FormatInt(newPowerLimit, 10)), 0644)
 				if err == nil {
 					node.Labels[labels[i]] = strconv.FormatInt(newPowerLimit, 10)
+				} else {
+					log.Printf("Error writing power limit to file %s: %v", filePath, err)
 				}
 			}
 
 			_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
 			if err != nil {
+				log.Printf("Error updating node labels: %v", err)
 				return fmt.Errorf("error updating node labels: %w", err)
 			}
 		}
