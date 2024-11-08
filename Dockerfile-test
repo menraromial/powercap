@@ -1,0 +1,20 @@
+# Utiliser l'image officielle de Go Alpine comme base
+FROM golang:1.22.5-alpine
+
+# Définir le répertoire de travail dans le conteneur
+WORKDIR /app
+
+# Copier les fichiers go.mod et go.sum dans le conteneur
+COPY go.mod go.sum ./
+
+# Télécharger les dépendances
+RUN go mod download
+
+# Copier le reste du code source dans le conteneur
+COPY . .
+
+# Construire l'application Go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o main .
+
+# Définir la commande à exécuter lors du démarrage du conteneur
+CMD ["./main"]
