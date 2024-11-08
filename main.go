@@ -298,6 +298,9 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 */
 func main() {
 	rand.NewSource(time.Now().UnixNano())
+
+	log.Println("Starting power capping application...")
+
 	clientset, err := getKubeClient()
 	if err != nil {
 		log.Fatalf("failed to get kubernetes client: %v", err)
