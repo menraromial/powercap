@@ -162,7 +162,10 @@ func initNodePowerLimits(clientset *kubernetes.Clientset,
 	}
 
 	for key, value := range labels {
-		if _, ok := node.Labels[key]; !ok {
+		// Check if the label key exists in the node's labels map and if the key starts with "c"(constant or constructor value).
+		// If the key does not exist in the node's labels or does not start with "c",
+		// add or update the label in the node's labels map with the provided value.
+		if _, ok := node.Labels[key]; !ok || !strings.HasPrefix(key, "c") {
 			node.Labels[key] = value
 		}
 	}
@@ -225,10 +228,10 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 	}
 
 	labels := []string{
-		"crapl0/constraint-0-power-limit-uw",
-		"crapl0/constraint-1-power-limit-uw",
-		"crapl1/constraint-0-power-limit-uw",
-		"crapl1/constraint-1-power-limit-uw",
+		"rapl0/constraint-0-power-limit-uw",
+		"rapl0/constraint-1-power-limit-uw",
+		"rapl1/constraint-0-power-limit-uw",
+		"rapl1/constraint-1-power-limit-uw",
 	}
 
 	powerLimits := make([]int64, len(labels))
