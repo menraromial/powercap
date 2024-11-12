@@ -24,7 +24,7 @@ const (
 	constraint0PowerLimitFile1 = raplPath + "/intel-rapl:1/constraint_0_power_limit_uw"
 	constraint1PowerLimitFile1 = raplPath + "/intel-rapl:1/constraint_1_power_limit_uw"
 	nodeEnv                    = "NODE_NAME"
-	timeToSleep                = 60 * time.Second
+	timeToSleep                = 300 * time.Second
 	minSource                  = 10000000.0
 	maxSource                  = 200000000.0
 )
