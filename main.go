@@ -25,8 +25,10 @@ const (
 	constraint1PowerLimitFile1 = raplPath + "/intel-rapl:1/constraint_1_power_limit_uw"
 	nodeEnv                    = "NODE_NAME"
 	timeToSleep                = 300 * time.Second
-	minSource                  = 10000000.0
-	maxSource                  = 200000000.0
+	minSource                  = 8000000.0
+	maxSource                  = 40000000.0
+	Pmax                       = 40000000.0
+	alpha                      = 4.0
 )
 
 func init() {
@@ -194,19 +196,26 @@ func getNodeLabelValue(clientset *kubernetes.Clientset, nodeName, label string) 
 
 func getSourcePower() (int64, error) {
 	// Placeholder implementation
+	currentTime := time.Now()
+	t := float64(currentTime.Hour()) + float64(currentTime.Minute())/60.0
+	P := Pmax * math.Pow(math.Sin((math.Pi/16)*(t-4)), alpha)
+	if P < 0 {
+		return 0, nil
+	}
+	return int64(math.Round(P)), nil
 
-	source := rand.NewSource(time.Now().UnixNano())
-	r := rand.New(source)
+	// source := rand.NewSource(time.Now().UnixNano())
+	// r := rand.New(source)
 
-	// Générer un nombre aléatoire exponentiel
-	lambda := 1.0 // le taux pour la distribution exponentielle
-	expRandom := r.ExpFloat64()
+	// // Générer un nombre aléatoire exponentiel
+	// lambda := 1.0 // le taux pour la distribution exponentielle
+	// expRandom := r.ExpFloat64()
 
-	// Échelle de la distribution exponentielle pour qu'elle corresponde aux bornes spécifiées
-	scaledExpRandom := minSource + (maxSource-minSource)*(1-math.Exp(-lambda*expRandom))
-	log.Printf("Generated source power: %d", int64(math.Round(scaledExpRandom)))
+	// // Échelle de la distribution exponentielle pour qu'elle corresponde aux bornes spécifiées
+	// scaledExpRandom := minSource + (maxSource-minSource)*(1-math.Exp(-lambda*expRandom))
+	// log.Printf("Generated source power: %d", int64(math.Round(scaledExpRandom)))
 
-	return int64(math.Round(scaledExpRandom)), nil
+	// return int64(math.Round(scaledExpRandom)), nil
 }
 
 // powerCap adjusts the power limits of a Kubernetes node based on the source power available.
@@ -227,15 +236,22 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 		return err
 	}
 
+	clabels := []string{
+		"crapl0/constraint-0-power-limit-uw",
+		"crapl0/constraint-1-power-limit-uw",
+		"crapl1/constraint-0-power-limit-uw",
+		"crapl1/constraint-1-power-limit-uw",
+	}
+
 	labels := []string{
 		"rapl0/constraint-0-power-limit-uw",
 		"rapl0/constraint-1-power-limit-uw",
 		"rapl1/constraint-0-power-limit-uw",
 		"rapl1/constraint-1-power-limit-uw",
 	}
-
-	powerLimits := make([]int64, len(labels))
-	for i, label := range labels {
+     // Actual power limits
+	powerLimits := make([]int64, len(clabels))
+	for i, label := range clabels {
 		value, err := getNodeLabelValue(clientset, nodeName, label)
 		if err != nil {
 			log.Printf("Error getting node label value for %s: %v", label, err)
@@ -248,37 +264,43 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 		}
 	}
 
+
 	sourcePower, err := getSourcePower()
 	if err != nil || sourcePower == 0 {
 		log.Printf("Error getting source power for node %s: %v", nodeName, err)
 		return fmt.Errorf("source power not found for node %s", nodeName)
 	}
 
+	log.Printf("Source power: %d", sourcePower)
+
 	r := float64(powerLimits[1]) / float64(sourcePower)
 	if r < 1 {
 		pc := r * 100
+		fact := 0.6 // Parce que en dessous de 60% le powercap ne marche pas bien avec la v1 de rapl
 		if pc >= 60 {
-			for i, filePath := range []string{
-				constraint0PowerLimitFile0,
-				constraint1PowerLimitFile0,
-				constraint0PowerLimitFile1,
-				constraint1PowerLimitFile1,
-			} {
-				newPowerLimit := int64(float64(powerLimits[i]) * r)
-				err = os.WriteFile(filePath, []byte(strconv.FormatInt(newPowerLimit, 10)), 0644)
-				if err == nil {
-					node.Labels[labels[i]] = strconv.FormatInt(newPowerLimit, 10)
-				} else {
-					log.Printf("Error writing power limit to file %s: %v", filePath, err)
-				}
-			}
+			fact = r	
+		} 
 
-			_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+		for i, filePath := range []string{
+			constraint0PowerLimitFile0,
+			constraint1PowerLimitFile0,
+			constraint0PowerLimitFile1,
+			constraint1PowerLimitFile1,
+		} {
+			newPowerLimit := int64(float64(powerLimits[i]) * fact)
+			err = os.WriteFile(filePath, []byte(strconv.FormatInt(newPowerLimit, 10)), 0644)
+			if err == nil {
+				node.Labels[labels[i]] = strconv.FormatInt(newPowerLimit, 10)
+			} else {
+				log.Printf("Error writing power limit to file %s: %v", filePath, err)
+			}
+		}
+
+		_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
 			if err != nil {
 				log.Printf("Error updating node labels: %v", err)
 				return fmt.Errorf("error updating node labels: %w", err)
 			}
-		}
 	}
 
 	return nil
