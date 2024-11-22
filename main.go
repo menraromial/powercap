@@ -273,7 +273,7 @@ func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
 
 	log.Printf("Source power: %d", sourcePower)
 
-	r := float64(powerLimits[1]) / float64(sourcePower)
+	r := float64(sourcePower) / float64(powerLimits[1])
 	if r <= 1 {
 		pc := r * 100
 		fact := 0.6 // Parce que en dessous de 60% le powercap ne marche pas bien avec la v1 de rapl
