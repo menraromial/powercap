@@ -26,7 +26,7 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates sudo
 
 # Copy the Pre-built binary file from the previous stage
-COPY --from=builder /app/main /usr/local/bin/powercapdev
+COPY --from=builder /app/main /usr/local/bin/powercap
 
 # Copy the RAPL files (if applicable)
 # Example: COPY ./sys/devices/virtual/powercap/intel-rapl/intel-rapl:0 /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0
@@ -35,4 +35,4 @@ COPY --from=builder /app/main /usr/local/bin/powercapdev
 # RUN chmod -R 755 /sys/devices/virtual/powercap/intel-rapl/
 
 # Command to run the executable
-CMD ["powercapdev"]
+CMD ["powercap"]
