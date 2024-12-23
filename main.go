@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -17,347 +16,316 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// Configuration constants
 const (
-	raplPath                   = "/sys/devices/virtual/powercap/intel-rapl"
-	constraint0PowerLimitFile0 = raplPath + "/intel-rapl:0/constraint_0_power_limit_uw"
-	constraint1PowerLimitFile0 = raplPath + "/intel-rapl:0/constraint_1_power_limit_uw"
-	constraint0PowerLimitFile1 = raplPath + "/intel-rapl:1/constraint_0_power_limit_uw"
-	constraint1PowerLimitFile1 = raplPath + "/intel-rapl:1/constraint_1_power_limit_uw"
-	nodeEnv                    = "NODE_NAME"
-	timeToSleep                = 300 * time.Second
-	minSource                  = 8000000.0
-	maxSource                  = 40000000.0
-	Pmax                       = 40000000.0
-	alpha                      = 4.0
+	raplBasePath = "/sys/devices/virtual/powercap/intel-rapl"
+	
+	// Environment variable names
+	envNodeName           = "NODE_NAME"
+	envMaxSource         = "MAX_SOURCE"
+	envStabilisationTime = "STABILISATION_TIME"
+	envAlpha             = "ALPHA"
+	envRaplLimit         = "RAPL_LIMIT"
+	envMaxHour		   = "MAX_HOUR"
+	
+	// Default values
+	defaultMaxSource         = "40000000"
+	defaultStabilisationTime = "300"
+	defaultAlpha            = "4"
+	defaultRaplLimit        = "60"
+	defaultMaxHour		   = "4"
 )
 
-func init() {
-	// Set log output format to include date and time
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+// PowerConstraint represents a RAPL power constraint configuration
+type PowerConstraint struct {
+	Path  string
+	Value string
 }
 
-func getKubeClient() (*kubernetes.Clientset, error) {
-	log.Println("Attempting to get in-cluster config")
-	config, err := rest.InClusterConfig()
+// Config holds the application configuration
+type Config struct {
+	MaxSource         float64
+	Alpha            float64
+	StabilisationTime time.Duration
+	RaplLimit        float64
+	MaxHour		   int
+	NodeName         string
+}
+
+// PowerManager handles power management operations
+type PowerManager struct {
+	clientset *kubernetes.Clientset
+	config    *Config
+	logger    *log.Logger
+}
+
+// NewPowerManager creates and initializes a new PowerManager
+func NewPowerManager(logger *log.Logger) (*PowerManager, error) {
+	config, err := loadConfig()
 	if err != nil {
-		log.Printf("Error getting in-cluster config: %v", err)
-		return nil, fmt.Errorf("error getting in-cluster config: %w", err)
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	log.Println("Attempting to create Kubernetes clientset")
+	clientset, err := createKubernetesClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+
+	return &PowerManager{
+		clientset: clientset,
+		config:    config,
+		logger:    logger,
+	}, nil
+}
+
+func loadConfig() (*Config, error) {
+	nodeName := os.Getenv(envNodeName)
+	if nodeName == "" {
+		return nil, fmt.Errorf("NODE_NAME environment variable is not set")
+	}
+
+	maxSource, err := strconv.ParseFloat(getEnvOrDefault(envMaxSource, defaultMaxSource), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid max source value: %w", err)
+	}
+
+	alpha, err := strconv.ParseFloat(getEnvOrDefault(envAlpha, defaultAlpha), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid alpha value: %w", err)
+	}
+
+	stabilisationTime, err := time.ParseDuration(getEnvOrDefault(envStabilisationTime, defaultStabilisationTime) + "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid stabilisation time: %w", err)
+	}
+
+	raplLimit, err := strconv.ParseFloat(getEnvOrDefault(envRaplLimit, defaultRaplLimit), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid RAPL limit: %w", err)
+	}
+
+	maxHour, err := strconv.Atoi(getEnvOrDefault(envMaxHour, defaultMaxHour))
+	if err != nil {
+		return nil, fmt.Errorf("invalid max hour: %w", err)
+	}
+
+	return &Config{
+		MaxSource:         maxSource,
+		Alpha:            alpha,
+		StabilisationTime: stabilisationTime,
+		RaplLimit:        raplLimit,
+		MaxHour:		   maxHour,
+		NodeName:         nodeName,
+	}, nil
+}
+
+func createKubernetesClient() (*kubernetes.Clientset, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+	}
+
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Printf("Error creating Kubernetes clientset: %v", err)
-		return nil, fmt.Errorf("error creating kubernetes clientset: %w", err)
+		return nil, fmt.Errorf("failed to create kubernetes clientset: %w", err)
 	}
-	log.Println("Successfully created Kubernetes clientset")
 
 	return clientset, nil
 }
 
-func getNodeName() (string, error) {
-	nodeName := os.Getenv(nodeEnv)
-	if nodeName == "" {
-		log.Println("NODE_NAME environment variable is not set")
-		return "", fmt.Errorf("no node name found in environment variable %s", nodeEnv)
-	}
-	log.Printf("NODE_NAME environment variable is set to %s", nodeName)
-	return nodeName, nil
-}
-
-func getNode(clientset *kubernetes.Clientset, nodeName string) (*v1.Node, error) {
-	log.Printf("Attempting to get node %s", nodeName)
-	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-	if err != nil {
-		log.Printf("Error getting node %s: %v", nodeName, err)
-		return nil, fmt.Errorf("error getting node %s: %w", nodeName, err)
-	}
-	log.Printf("Successfully retrieved node %s", nodeName)
-	return node, nil
-}
-
-// getPowerLimits retrieves power limits from predefined constraint files.
-// It returns four power limit values as strings and an error if any occurs during reading the files.
-// If an error occurs while reading a file, the corresponding power limit is set to "0".
-//
-// Returns:
-//   - string: Power limit from constraint0PowerLimitFile0
-//   - string: Power limit from constraint1PowerLimitFile0
-//   - string: Power limit from constraint0PowerLimitFile1
-//   - string: Power limit from constraint1PowerLimitFile1
-//   - error: Error encountered during reading the power limit files, if any
-func getPowerLimits() (string, string, string, string) {
-	constraints := []string{
-		constraint0PowerLimitFile0,
-		constraint1PowerLimitFile0,
-		constraint0PowerLimitFile1,
-		constraint1PowerLimitFile1,
+// getPowerConstraints returns all RAPL power constraints
+func (pm *PowerManager) getPowerConstraints() ([]PowerConstraint, error) {
+	constraints := []PowerConstraint{
+		{Path: fmt.Sprintf("%s/intel-rapl:0/constraint_0_power_limit_uw", raplBasePath)},
+		{Path: fmt.Sprintf("%s/intel-rapl:0/constraint_1_power_limit_uw", raplBasePath)},
+		{Path: fmt.Sprintf("%s/intel-rapl:1/constraint_0_power_limit_uw", raplBasePath)},
+		{Path: fmt.Sprintf("%s/intel-rapl:1/constraint_1_power_limit_uw", raplBasePath)},
 	}
 
-	limits := make([]string, len(constraints))
-	for i, filePath := range constraints {
-		limit, err := readPowerLimit(filePath)
+	for i := range constraints {
+		value, err := readPowerLimit(constraints[i].Path)
 		if err != nil {
-			log.Printf("Error reading power limit from %s: %v", filePath, err)
-			limits[i] = "0"
-		} else {
-			log.Printf("Successfully read power limit from %s: %s", filePath, limit)
-			limits[i] = limit
+			constraints[i].Value = "0"
+			//return nil, fmt.Errorf("failed to read power limit: %w", err)
 		}
+		constraints[i].Value = value
 	}
 
-	return limits[0], limits[1], limits[2], limits[3]
+	return constraints, nil
 }
 
-func readPowerLimit(filePath string) (string, error) {
-
-	data, err := os.ReadFile(filePath)
+func readPowerLimit(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("Failed to read file %s: %v", filePath, err)
-		return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
+		return "", fmt.Errorf("failed to read file %s: %w", path, err)
 	}
 	return strings.TrimSpace(string(data)), nil
-
-	// min := 23000000
-	// max := 110000000
-	// randomNumber := rand.Intn(max-min+1) + min
-	// str := strconv.Itoa(randomNumber)
-	// return str, nil
 }
 
-// initNodePowerLimits initializes the power limits for RAPL (Running Average Power Limit) domains
-// on a specified Kubernetes node by setting appropriate labels.
-//
-// Parameters:
-// - clientset: A Kubernetes clientset to interact with the Kubernetes API.
-// - nodeName: The name of the node to set the power limits on.
-// - constraint0PowerLimit0: Power limit for RAPL domain 0, constraint 0.
-// - constraint1PowerLimit0: Power limit for RAPL domain 0, constraint 1.
-// - constraint0PowerLimit1: Power limit for RAPL domain 1, constraint 0.
-// - constraint1PowerLimit1: Power limit for RAPL domain 1, constraint 1.
-func initNodePowerLimits(clientset *kubernetes.Clientset,
-	nodeName string,
-	constraint0PowerLimit0,
-	constraint1PowerLimit0,
-	constraint0PowerLimit1,
-	constraint1PowerLimit1 string) error {
-
-	node, err := getNode(clientset, nodeName)
+// initializeNode initializes the node with power constraints
+func (pm *PowerManager) initializeNode(constraints []PowerConstraint) error {
+	node, err := pm.getNode()
 	if err != nil {
-		log.Printf("Error retrieving node %s: %v", nodeName, err)
-		return err
+		return fmt.Errorf("failed to get node: %w", err)
 	}
+
 	if node.Labels == nil {
 		node.Labels = make(map[string]string)
 	}
 
-	// Initialize the RAPL domains with the power limits
-	labels := map[string]string{
-		"rapl0/constraint-0-power-limit-uw":  constraint0PowerLimit0,
-		"rapl0/constraint-1-power-limit-uw":  constraint1PowerLimit0,
-		"rapl1/constraint-0-power-limit-uw":  constraint0PowerLimit1,
-		"rapl1/constraint-1-power-limit-uw":  constraint1PowerLimit1,
-		"crapl0/constraint-0-power-limit-uw": constraint0PowerLimit0,
-		"crapl0/constraint-1-power-limit-uw": constraint1PowerLimit0,
-		"crapl1/constraint-0-power-limit-uw": constraint0PowerLimit1,
-		"crapl1/constraint-1-power-limit-uw": constraint1PowerLimit1,
+	// Initialize labels with power constraints
+	for i, constraint := range constraints {
+		raplPrefix := fmt.Sprintf("rapl%d/constraint_%d_power_limit_uw", i/2, i%2)
+		craplPrefix := fmt.Sprintf("crapl%d/constraint_%d_power_limit_uw", i/2, i%2)
+		
+		node.Labels[raplPrefix] = constraint.Value
+		node.Labels[craplPrefix] = constraint.Value
 	}
 
-	for key, value := range labels {
-		// Check if the label key exists in the node's labels map and if the key starts with "c"(constant or constructor value).
-		// If the key does not exist in the node's labels or does not start with "c",
-		// add or update the label in the node's labels map with the provided value.
-		if _, ok := node.Labels[key]; !ok || !strings.HasPrefix(key, "c") {
-			node.Labels[key] = value
-		}
-	}
-
-	_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
-	if err != nil {
-		log.Printf("Error updating node %s: %v", nodeName, err)
-		return fmt.Errorf("error updating node %s: %w", nodeName, err)
-	}
-	return nil
+	return pm.updateNode(node)
 }
 
-func getNodeLabelValue(clientset *kubernetes.Clientset, nodeName, label string) (string, error) {
-	node, err := getNode(clientset, nodeName)
-	if err != nil {
-		return "", err
-	}
-
-	value, ok := node.Labels[label]
-	if !ok || value == "" {
-		log.Printf("Label %s not found on node %s", label, nodeName)
-		return "", fmt.Errorf("label %s not found on node %s", label, nodeName)
-	}
-	return strings.TrimSpace(value), nil
+func (pm *PowerManager) getNode() (*v1.Node, error) {
+	return pm.clientset.CoreV1().Nodes().Get(context.TODO(), pm.config.NodeName, metav1.GetOptions{})
 }
 
-func getSourcePower() (int64, error) {
-	// Placeholder implementation
+func (pm *PowerManager) updateNode(node *v1.Node) error {
+	_, err := pm.clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+	return err
+}
+
+// calculateSourcePower calculates the current source power based on time of day
+func (pm *PowerManager) calculateSourcePower() int64 {
 	currentTime := time.Now()
 	t := float64(currentTime.Hour()) + float64(currentTime.Minute())/60.0
-	P := Pmax * math.Pow(math.Sin((math.Pi/16)*(t-4)), alpha)
-	if P < 0 {
-		return 0, nil
+	power := pm.config.MaxSource * math.Pow(math.Sin((math.Pi/16)*(t-float64(pm.config.MaxHour))), pm.config.Alpha)
+	
+	if power < 0 {
+		return 0
 	}
-	return int64(math.Round(P)), nil
-
-	// source := rand.NewSource(time.Now().UnixNano())
-	// r := rand.New(source)
-
-	// // Générer un nombre aléatoire exponentiel
-	// lambda := 1.0 // le taux pour la distribution exponentielle
-	// expRandom := r.ExpFloat64()
-
-	// // Échelle de la distribution exponentielle pour qu'elle corresponde aux bornes spécifiées
-	// scaledExpRandom := minSource + (maxSource-minSource)*(1-math.Exp(-lambda*expRandom))
-	// log.Printf("Generated source power: %d", int64(math.Round(scaledExpRandom)))
-
-	// return int64(math.Round(scaledExpRandom)), nil
+	
+	return int64(math.Round(power))
 }
 
-// powerCap adjusts the power limits of a Kubernetes node based on the source power available.
-// It retrieves the current power limits from the node's labels, calculates the new power limits
-// based on the ratio of the power limit to the source power, and updates the node's labels and
-// corresponding files if the new power limit percentage is greater than or equal to 60%.
-//
-// Parameters:
-// - clientset: A Kubernetes clientset to interact with the Kubernetes API.
-// - nodeName: The name of the node to adjust the power limits for.
-//
-// Returns:
-// - An error if any step in the process fails, otherwise nil.
-func powerCap(clientset *kubernetes.Clientset, nodeName string) error {
-	node, err := getNode(clientset, nodeName)
+// adjustPowerCap adjusts the power cap based on available source power
+func (pm *PowerManager) adjustPowerCap() error {
+	node, err := pm.getNode()
 	if err != nil {
-		log.Printf("Error retrieving node %s: %v", nodeName, err)
-		return err
+		return fmt.Errorf("failed to get node: %w", err)
 	}
 
-	clabels := []string{
-		"crapl0/constraint-0-power-limit-uw",
-		"crapl0/constraint-1-power-limit-uw",
-		"crapl1/constraint-0-power-limit-uw",
-		"crapl1/constraint-1-power-limit-uw",
+	sourcePower := pm.calculateSourcePower()
+	if sourcePower == 0 {
+		return fmt.Errorf("invalid source power")
 	}
 
-	labels := []string{
-		"rapl0/constraint-0-power-limit-uw",
-		"rapl0/constraint-1-power-limit-uw",
-		"rapl1/constraint-0-power-limit-uw",
-		"rapl1/constraint-1-power-limit-uw",
+	powerLimits, err := pm.getCurrentPowerLimits(node)
+	if err != nil {
+		return fmt.Errorf("failed to get current power limits: %w", err)
 	}
-     // Actual power limits
-	powerLimits := make([]int64, len(clabels))
-	for i, label := range clabels {
-		value, err := getNodeLabelValue(clientset, nodeName, label)
-		if err != nil {
-			log.Printf("Error getting node label value for %s: %v", label, err)
-			return err
-		}
-		powerLimits[i], err = strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			log.Printf("Error parsing power limit for label %s: %v", label, err)
-			return fmt.Errorf("error parsing power limit for label %s: %w", label, err)
+
+	// Trouver la valeur maximale non nulle
+	maxNonZeroPowerLimit := int64(0)
+	for _, limit := range powerLimits {
+		if limit > maxNonZeroPowerLimit {
+			maxNonZeroPowerLimit = limit
 		}
 	}
 
-
-	sourcePower, err := getSourcePower()
-	if err != nil || sourcePower == 0 {
-		log.Printf("Error getting source power for node %s: %v", nodeName, err)
-		return fmt.Errorf("source power not found for node %s", nodeName)
+	if maxNonZeroPowerLimit == 0 {
+		return fmt.Errorf("no valid power limit found")
 	}
 
-	log.Printf("Source power: %d", sourcePower)
-
-	r := float64(sourcePower) / float64(powerLimits[1])
-	if r <= 1 {
-		pc := r * 100
-		fact := 0.6 // Parce que en dessous de 60% le powercap ne marche pas bien avec la v1 de rapl
-		if pc >= 60 {
-			fact = r	
-		} 
-
-		for i, filePath := range []string{
-			constraint0PowerLimitFile0,
-			constraint1PowerLimitFile0,
-			constraint0PowerLimitFile1,
-			constraint1PowerLimitFile1,
-		} {
-			newPowerLimit := int64(float64(powerLimits[i]) * fact)
-			err = os.WriteFile(filePath, []byte(strconv.FormatInt(newPowerLimit, 10)), 0644)
-			if err == nil {
-				node.Labels[labels[i]] = strconv.FormatInt(newPowerLimit, 10)
-			} else {
-				log.Printf("Error writing power limit to file %s: %v", filePath, err)
-			}
-		}
-
-		_, err = clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
-			if err != nil {
-				log.Printf("Error updating node labels: %v", err)
-				return fmt.Errorf("error updating node labels: %w", err)
-			}
-	}
-
-	return nil
-}
-
-/*
-	func modifyPowerLimit(newConstraint0PowerLimit, newConstraint1PowerLimit int64) error {
-		cmd0 := exec.Command("sudo", "sh", "-c", fmt.Sprintf("echo %d > %s", newConstraint0PowerLimit, constraint0PowerLimitFile))
-		if err := cmd0.Run(); err != nil {
-			return fmt.Errorf("failed to set constraint0 power limit: %w", err)
-		}
-
-		cmd1 := exec.Command("sudo", "sh", "-c", fmt.Sprintf("echo %d > %s", newConstraint1PowerLimit, constraint1PowerLimitFile))
-		if err := cmd1.Run(); err != nil {
-			return fmt.Errorf("failed to set constraint1 power limit: %w", err)
-		}
-
+	ratio := float64(sourcePower) / float64(maxNonZeroPowerLimit)
+	if ratio > 1 {
 		return nil
 	}
-*/
+
+	factor := pm.config.RaplLimit / 100.0
+	if (ratio * 100) >= pm.config.RaplLimit {
+		factor = ratio
+	}
+
+	return pm.applyPowerLimits(node, powerLimits, factor)
+}
+
+func (pm *PowerManager) getCurrentPowerLimits(node *v1.Node) ([]int64, error) {
+	var powerLimits []int64
+	
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			label := fmt.Sprintf("crapl%d/constraint_%d_power_limit_uw", i, j)
+			value, ok := node.Labels[label]
+			if !ok {
+				return nil, fmt.Errorf("power limit label not found: %s", label)
+			}
+			
+			limit, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid power limit value: %w", err)
+			}
+			
+			powerLimits = append(powerLimits, limit)
+		}
+	}
+	
+	return powerLimits, nil
+}
+
+func (pm *PowerManager) applyPowerLimits(node *v1.Node, currentLimits []int64, factor float64) error {
+	constraints, err := pm.getPowerConstraints()
+	if err != nil {
+		return fmt.Errorf("failed to get power constraints: %w", err)
+	}
+
+	for i, constraint := range constraints {
+		newLimit := int64(float64(currentLimits[i]) * factor)
+		
+		// Update RAPL file
+		if err := os.WriteFile(constraint.Path, []byte(strconv.FormatInt(newLimit, 10)), 0644); err != nil {
+			pm.logger.Printf("Failed to write power limit to %s: %v", constraint.Path, err)
+			continue
+		}
+		
+		// Update node label
+		label := fmt.Sprintf("rapl%d/constraint_%d_power_limit_uw", i/2, i%2)
+		node.Labels[label] = strconv.FormatInt(newLimit, 10)
+	}
+
+	return pm.updateNode(node)
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
+
 func main() {
-	rand.NewSource(time.Now().UnixNano())
+	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger.Println("Starting power management system...")
 
-	log.Println("Starting power capping application...")
-
-	clientset, err := getKubeClient()
+	pm, err := NewPowerManager(logger)
 	if err != nil {
-		log.Fatalf("failed to get kubernetes client: %v", err)
+		logger.Fatalf("Failed to initialize power manager: %v", err)
 	}
 
-	nodeName, err := getNodeName()
+	constraints, err := pm.getPowerConstraints()
 	if err != nil {
-		log.Fatalf("failed to get node name: %v", err)
+		logger.Fatalf("Failed to get power constraints: %v", err)
 	}
 
-	constraint0PowerLimit0, constraint1PowerLimit0, constraint0PowerLimit1, constraint1PowerLimit1 := getPowerLimits()
-
-	err = initNodePowerLimits(clientset, nodeName, constraint0PowerLimit0, constraint1PowerLimit0, constraint0PowerLimit1, constraint1PowerLimit1)
-	if err != nil {
-		log.Fatalf("failed to init node power limits: %v", err)
+	if err := pm.initializeNode(constraints); err != nil {
+		logger.Fatalf("Failed to initialize node: %v", err)
 	}
 
-	// for {
-	// 	err = powerCap(clientset, nodeName)
-	// 	if err != nil {
-	// 		log.Printf("error during power capping: %v", err)
-	// 	}
-
-	// 	time.Sleep(timeToSleep) // Sleep to avoid tight loop
-	// }
-
-	ticker := time.NewTicker(timeToSleep)
+	ticker := time.NewTicker(pm.config.StabilisationTime)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := powerCap(clientset, nodeName); err != nil {
-			log.Printf("Error during power capping: %v", err)
+		if err := pm.adjustPowerCap(); err != nil {
+			logger.Printf("Failed to adjust power cap: %v", err)
 		}
 	}
 }
