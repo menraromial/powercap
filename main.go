@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
+	//"io/fs"
 	"log"
 	"math"
 	"os"
@@ -68,60 +68,60 @@ type PowerManager struct {
 
 // discoverRaplDomains finds all RAPL domains and their constraints in the system
 func discoverRaplDomains() ([]RaplDomain, error) {
-	var domains []RaplDomain
+    var domains []RaplDomain
 
-	// List all RAPL domains
-	entries, err := os.ReadDir(raplBasePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read RAPL base path: %w", err)
-	}
+    // List all RAPL domains
+    entries, err := os.ReadDir(raplBasePath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read RAPL base path: %w", err)
+    }
 
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
-			continue
-		}
+    for _, entry := range entries {
+        if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
+            continue
+        }
 
-		domain := RaplDomain{
-			ID: entry.Name(),
-		}
+        domain := RaplDomain{
+            ID: entry.Name(),
+        }
 
-		// Find all constraint files in this domain
-		err := filepath.WalkDir(
-			filepath.Join(raplBasePath, entry.Name()),
-			func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
+        // Read only direct constraint files in this domain
+        domainPath := filepath.Join(raplBasePath, entry.Name())
+        constraintEntries, err := os.ReadDir(domainPath)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read domain directory: %w", err)
+        }
 
-				if strings.HasPrefix(d.Name(), "constraint_") && strings.HasSuffix(d.Name(), "_power_limit_uw") {
-					// Extract constraint number from filename
-					constraintNum, err := strconv.Atoi(string(d.Name()[11]))
-					if err != nil {
-						return fmt.Errorf("invalid constraint number in %s: %w", d.Name(), err)
-					}
+        for _, constEntry := range constraintEntries {
+            // Skip directories and non-constraint files
+            if constEntry.IsDir() || !strings.HasPrefix(constEntry.Name(), "constraint_") || !strings.HasSuffix(constEntry.Name(), "_power_limit_uw") {
+                continue
+            }
 
-					value, err := readPowerLimit(path)
-					if err != nil {
-						return fmt.Errorf("failed to read power limit: %w", err)
-					}
+            // Extract constraint number from filename
+            constraintNum, err := strconv.Atoi(string(constEntry.Name()[11]))
+            if err != nil {
+                return nil, fmt.Errorf("invalid constraint number in %s: %w", constEntry.Name(), err)
+            }
 
-					domain.Constraints = append(domain.Constraints, PowerConstraint{
-						ID:    constraintNum,
-						Path:  path,
-						Value: value,
-					})
-				}
-				return nil
-			})
+            path := filepath.Join(domainPath, constEntry.Name())
+            value, err := readPowerLimit(path)
+            log.Println("path : ", path, " value : ", value)
+            if err != nil {
+                return nil, fmt.Errorf("failed to read power limit: %w", err)
+            }
 
-		if err != nil {
-			return nil, fmt.Errorf("failed to walk domain directory: %w", err)
-		}
+            domain.Constraints = append(domain.Constraints, PowerConstraint{
+                ID:    constraintNum,
+                Path:  path,
+                Value: value,
+            })
+        }
 
-		domains = append(domains, domain)
-	}
+        domains = append(domains, domain)
+    }
 
-	return domains, nil
+    return domains, nil
 }
 
 // NewPowerManager creates and initializes a new PowerManager
@@ -140,6 +140,8 @@ func NewPowerManager(logger *log.Logger) (*PowerManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover RAPL domains: %w", err)
 	}
+
+	log.Println("domains : ", domains)
 
 	return &PowerManager{
 		clientset:   clientset,
