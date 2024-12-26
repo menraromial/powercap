@@ -202,7 +202,7 @@ func createKubernetesClient() (*kubernetes.Clientset, error) {
 	return clientset, nil
 }
 
-// isNodeInitialized vérifie si le nœud a déjà été initialisé
+// isNodeInitialized checks if the node has already been initialized
 func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
     if node.Annotations == nil {
         return false
@@ -211,7 +211,7 @@ func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
     return exists
 }
 
-// markNodeAsInitialized marque le nœud comme initialisé
+// markNodeAsInitialized marks the node as initialized
 func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
     if node.Annotations == nil {
         node.Annotations = make(map[string]string)
@@ -221,14 +221,14 @@ func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
 }
 
 
-// initializeNode initialise le nœud avec les contraintes de puissance
+// initializeNode initializes the node with power constraints
 func (pm *PowerManager) initializeNode() error {
     node, err := pm.getNode()
     if err != nil {
         return fmt.Errorf("failed to get node: %w", err)
     }
 
-    // Vérifier si le nœud est déjà initialisé
+	// Check if the node is already initialized
     if pm.isNodeInitialized(node) {
         pm.logger.Println("Node already initialized, skipping initialization")
         return nil
@@ -238,7 +238,7 @@ func (pm *PowerManager) initializeNode() error {
         node.Labels = make(map[string]string)
     }
 
-    // Initialiser les labels avec les contraintes de puissance pour chaque domaine
+	// Initialize labels with power constraints for each domain
     for _, domain := range pm.raplDomains {
         domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
         for _, constraint := range domain.Constraints {
@@ -250,7 +250,7 @@ func (pm *PowerManager) initializeNode() error {
         }
     }
 
-    // Marquer le nœud comme initialisé
+	// Mark the node as initialized
     if err := pm.markNodeAsInitialized(node); err != nil {
         return fmt.Errorf("failed to mark node as initialized: %w", err)
     }
