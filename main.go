@@ -34,6 +34,8 @@ const (
 	defaultStabilisationTime = "300"
 	defaultAlpha            = "4"
 	defaultRaplLimit        = "60"
+
+	initializationAnnotation = "power-manager/initialized"
 )
 
 // RaplDomain represents a RAPL domain with its constraints
@@ -199,30 +201,61 @@ func createKubernetesClient() (*kubernetes.Clientset, error) {
 
 	return clientset, nil
 }
-// initializeNode initializes the node with power constraints
+
+// isNodeInitialized vérifie si le nœud a déjà été initialisé
+func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
+    if node.Annotations == nil {
+        return false
+    }
+    _, exists := node.Annotations[initializationAnnotation]
+    return exists
+}
+
+// markNodeAsInitialized marque le nœud comme initialisé
+func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
+    if node.Annotations == nil {
+        node.Annotations = make(map[string]string)
+    }
+    node.Annotations[initializationAnnotation] = "kcas-power-manager"
+    return pm.updateNode(node)
+}
+
+
+// initializeNode initialise le nœud avec les contraintes de puissance
 func (pm *PowerManager) initializeNode() error {
-	node, err := pm.getNode()
-	if err != nil {
-		return fmt.Errorf("failed to get node: %w", err)
-	}
+    node, err := pm.getNode()
+    if err != nil {
+        return fmt.Errorf("failed to get node: %w", err)
+    }
 
-	if node.Labels == nil {
-		node.Labels = make(map[string]string)
-	}
+    // Vérifier si le nœud est déjà initialisé
+    if pm.isNodeInitialized(node) {
+        pm.logger.Println("Node already initialized, skipping initialization")
+        return nil
+    }
 
-	// Initialize labels with power constraints for each domain
-	for _, domain := range pm.raplDomains {
-		domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
-		for _, constraint := range domain.Constraints {
-			raplLabel := fmt.Sprintf("rapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-			craplLabel := fmt.Sprintf("crapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-			
-			node.Labels[raplLabel] = constraint.Value
-			node.Labels[craplLabel] = constraint.Value
-		}
-	}
+    if node.Labels == nil {
+        node.Labels = make(map[string]string)
+    }
 
-	return pm.updateNode(node)
+    // Initialiser les labels avec les contraintes de puissance pour chaque domaine
+    for _, domain := range pm.raplDomains {
+        domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
+        for _, constraint := range domain.Constraints {
+            raplLabel := fmt.Sprintf("rapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
+            craplLabel := fmt.Sprintf("crapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
+            
+            node.Labels[raplLabel] = constraint.Value
+            node.Labels[craplLabel] = constraint.Value
+        }
+    }
+
+    // Marquer le nœud comme initialisé
+    if err := pm.markNodeAsInitialized(node); err != nil {
+        return fmt.Errorf("failed to mark node as initialized: %w", err)
+    }
+
+    return nil
 }
 
 func readPowerLimit(path string) (string, error) {
