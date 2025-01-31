@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"errors"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,12 +29,14 @@ const (
 	envStabilisationTime = "STABILISATION_TIME"
 	envAlpha             = "ALPHA"
 	envRaplLimit         = "RAPL_LIMIT"
+	envPmaxFunc		  = "PMAX_FUNC"
 	
 	// Default values
 	defaultMaxSource         = "40000000"
 	defaultStabilisationTime = "300"
 	defaultAlpha            = "4"
 	defaultRaplLimit        = "60"
+	defaultPmaxFunc		  = "max"
 
 	initializationAnnotation = "power-manager/initialized"
 )
@@ -57,6 +60,7 @@ type Config struct {
 	Alpha            float64
 	StabilisationTime time.Duration
 	RaplLimit        float64
+	PmaxFunc		 string // max, min, avg or sum
 	NodeName         string
 }
 
@@ -143,6 +147,7 @@ func NewPowerManager(logger *log.Logger) (*PowerManager, error) {
 		return nil, fmt.Errorf("failed to discover RAPL domains: %w", err)
 	}
 
+
 	log.Println("domains : ", domains)
 
 	return &PowerManager{
@@ -179,11 +184,14 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid RAPL limit: %w", err)
 	}
 
+	pmaxFunc := getEnvOrDefault(envPmaxFunc, defaultPmaxFunc)
+
 	return &Config{
 		MaxSource:         maxSource,
 		Alpha:            alpha,
 		StabilisationTime: stabilisationTime,
 		RaplLimit:        raplLimit,
+		PmaxFunc:		 pmaxFunc,
 		NodeName:         nodeName,
 	}, nil
 }
@@ -290,8 +298,8 @@ func (pm *PowerManager) calculateSourcePower() int64 {
 	return int64(math.Round(power))
 }
 
-// getCurrentPowerLimits gets current power limits for all domains from node labels
-func (pm *PowerManager) getCurrentPowerLimits(node *v1.Node) (map[string][]int64, error) {
+// getDefaultPowerLimits gets current power limits for all domains from node labels
+func (pm *PowerManager) getDefaultPowerLimits(node *v1.Node) (map[string][]int64, error) {
 	powerLimits := make(map[string][]int64)
 	
 	for _, domain := range pm.raplDomains {
@@ -331,26 +339,17 @@ func (pm *PowerManager) adjustPowerCap() error {
 		return fmt.Errorf("invalid source power")
 	}
 
-	powerLimits, err := pm.getCurrentPowerLimits(node)
+	powerLimits, err := pm.getDefaultPowerLimits(node)
 	if err != nil {
 		return fmt.Errorf("failed to get current power limits: %w", err)
 	}
 
-	// Find maximum non-zero power limit across all domains
-	maxNonZeroPowerLimit := int64(0)
-	for _, limits := range powerLimits {
-		for _, limit := range limits {
-			if limit > maxNonZeroPowerLimit {
-				maxNonZeroPowerLimit = limit
-			}
-		}
+	pmax, err := pm.getPmax(powerLimits)
+	if err != nil || pmax == 0 {
+		return fmt.Errorf("failed to get Pmax: %w", err)
 	}
 
-	if maxNonZeroPowerLimit == 0 {
-		return fmt.Errorf("no valid power limit found")
-	}
-
-	ratio := float64(sourcePower) / float64(maxNonZeroPowerLimit)
+	ratio := float64(sourcePower) / float64(pmax)
 	if ratio > 1 {
 		return nil
 	}
@@ -363,10 +362,77 @@ func (pm *PowerManager) adjustPowerCap() error {
 	return pm.applyPowerLimits(node, powerLimits, factor)
 }
 
+
+func (pm *PowerManager) getPmax(powerLimits map[string][]int64) (int64, error) {
+    if len(powerLimits) == 0 {
+        return 0, errors.New("powerLimits map is empty")
+    }
+
+    var pmax int64
+    var count int
+
+    switch pm.config.PmaxFunc {
+    case "max":
+        pmax = math.MinInt64
+		foundValue := false 
+        for _, limits := range powerLimits {
+            for _, limit := range limits {
+                if limit > pmax {
+                    pmax = limit
+					foundValue = true
+                }
+            }
+        }
+		if !foundValue {
+			return 0, errors.New("no non-zero limits found for max calculation")
+		}
+    case "min":
+        pmax = math.MaxInt64
+        foundNonZero := false // Indicateur pour vérifier si au moins une valeur non nulle a été trouvée
+        for _, limits := range powerLimits {
+            for _, limit := range limits {
+                if limit != 0 && limit < pmax {
+                    pmax = limit
+                    foundNonZero = true
+                }
+            }
+        }
+        if !foundNonZero {
+            return 0, errors.New("no non-zero limits found for min calculation")
+        }
+    case "avg":
+        pmax = 0
+        count = 0
+        for _, limits := range powerLimits {
+            for _, limit := range limits {
+                if limit != 0 {
+                    pmax += limit
+                    count++
+                }
+            }
+        }
+        if count == 0 {
+            return 0, errors.New("no non-zero limits found for average calculation")
+        }
+        pmax /= int64(count)
+    case "sum":
+        pmax = 0
+        for _, limits := range powerLimits {
+            for _, limit := range limits {
+                pmax += limit
+            }
+        }
+    default:
+        return 0, errors.New("unsupported PmaxFunc value")
+    }
+
+    return pmax, nil
+}
+
 // applyPowerLimits applies new power limits to all domains
-func (pm *PowerManager) applyPowerLimits(node *v1.Node, currentLimits map[string][]int64, factor float64) error {
+func (pm *PowerManager) applyPowerLimits(node *v1.Node, defaultLimits map[string][]int64, factor float64) error {
 	for _, domain := range pm.raplDomains {
-		domainLimits, ok := currentLimits[domain.ID]
+		domainLimits, ok := defaultLimits[domain.ID]
 		if !ok {
 			continue
 		}
