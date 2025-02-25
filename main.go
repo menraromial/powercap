@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	//"io/fs"
 	"log"
 	"math"
 	"os"
@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"errors"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,116 +21,60 @@ import (
 // Configuration constants
 const (
 	raplBasePath = "/sys/devices/virtual/powercap/intel-rapl"
-	
+
 	// Environment variable names
-	envNodeName           = "NODE_NAME"
+	envNodeName          = "NODE_NAME"
 	envMaxSource         = "MAX_SOURCE"
 	envStabilisationTime = "STABILISATION_TIME"
 	envAlpha             = "ALPHA"
-	envRaplLimit         = "RAPL_LIMIT"
-	envPmaxFunc		  = "PMAX_FUNC"
-	
+	envRaplLimit         = "RAPL_MIN_POWER"
+
 	// Default values
 	defaultMaxSource         = "40000000"
 	defaultStabilisationTime = "300"
-	defaultAlpha            = "4"
-	defaultRaplLimit        = "60"
-	defaultPmaxFunc		  = "max"
+	defaultAlpha             = "4"
+	defaultRaplLimit         = "10000000"
 
 	initializationAnnotation = "power-manager/initialized"
 )
 
-// RaplDomain represents a RAPL domain with its constraints
-type RaplDomain struct {
-	ID          string // e.g., "intel-rapl:0"
-	Constraints []PowerConstraint
-}
+// Configuration types
+type (
+	// RaplDomain represents a RAPL domain with its constraints
+	RaplDomain struct {
+		ID             string // e.g., "intel-rapl:0"
+		Constraints    []PowerConstraint
+		ConstraintsMax []PowerConstraint
+	}
 
-// PowerConstraint represents a RAPL power constraint configuration
-type PowerConstraint struct {
-	ID    int    // constraint number (0, 1, etc.)
-	Path  string // full path to the constraint file
-	Value string // current power limit value
-}
+	// PowerConstraint represents a RAPL power constraint configuration
+	PowerConstraint struct {
+		ID    int    // constraint number (0, 1, etc.)
+		Path  string // full path to the constraint file
+		Value string // current power limit value
+	}
 
-// Config holds the application configuration
-type Config struct {
-	MaxSource         float64
-	Alpha            float64
-	StabilisationTime time.Duration
-	RaplLimit        float64
-	PmaxFunc		 string // max, min, avg or sum
-	NodeName         string
-}
+	// Config holds the application configuration
+	Config struct {
+		MaxSource         float64
+		Alpha             float64
+		StabilisationTime time.Duration
+		RaplLimit         int64
+		NodeName          string
+	}
 
-// PowerManager handles power management operations
-type PowerManager struct {
-	clientset   *kubernetes.Clientset
-	config      *Config
-	logger      *log.Logger
-	raplDomains []RaplDomain
-}
-
-// discoverRaplDomains finds all RAPL domains and their constraints in the system
-func discoverRaplDomains() ([]RaplDomain, error) {
-    var domains []RaplDomain
-
-    // List all RAPL domains
-    entries, err := os.ReadDir(raplBasePath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read RAPL base path: %w", err)
-    }
-
-    for _, entry := range entries {
-        if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
-            continue
-        }
-
-        domain := RaplDomain{
-            ID: entry.Name(),
-        }
-
-        // Read only direct constraint files in this domain
-        domainPath := filepath.Join(raplBasePath, entry.Name())
-        constraintEntries, err := os.ReadDir(domainPath)
-        if err != nil {
-            return nil, fmt.Errorf("failed to read domain directory: %w", err)
-        }
-
-        for _, constEntry := range constraintEntries {
-            // Skip directories and non-constraint files
-            if constEntry.IsDir() || !strings.HasPrefix(constEntry.Name(), "constraint_") || !strings.HasSuffix(constEntry.Name(), "_power_limit_uw") {
-                continue
-            }
-
-            // Extract constraint number from filename
-            constraintNum, err := strconv.Atoi(string(constEntry.Name()[11]))
-            if err != nil {
-                return nil, fmt.Errorf("invalid constraint number in %s: %w", constEntry.Name(), err)
-            }
-
-            path := filepath.Join(domainPath, constEntry.Name())
-            value, err := readPowerLimit(path)
-            log.Println("path : ", path, " value : ", value)
-            if err != nil {
-                return nil, fmt.Errorf("failed to read power limit: %w", err)
-            }
-
-            domain.Constraints = append(domain.Constraints, PowerConstraint{
-                ID:    constraintNum,
-                Path:  path,
-                Value: value,
-            })
-        }
-
-        domains = append(domains, domain)
-    }
-
-    return domains, nil
-}
+	// PowerManager handles power management operations
+	PowerManager struct {
+		clientset   *kubernetes.Clientset
+		config      *Config
+		logger      *log.Logger
+		raplDomains []RaplDomain
+		ctx         context.Context
+	}
+)
 
 // NewPowerManager creates and initializes a new PowerManager
-func NewPowerManager(logger *log.Logger) (*PowerManager, error) {
+func NewPowerManager(ctx context.Context, logger *log.Logger) (*PowerManager, error) {
 	config, err := loadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
@@ -142,26 +85,112 @@ func NewPowerManager(logger *log.Logger) (*PowerManager, error) {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	domains, err := discoverRaplDomains()
+	domains, err := discoverRaplDomains(logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover RAPL domains: %w", err)
 	}
 
-
-	log.Println("domains : ", domains)
+	logger.Printf("Discovered %d RAPL domains", len(domains))
 
 	return &PowerManager{
 		clientset:   clientset,
 		config:      config,
 		logger:      logger,
 		raplDomains: domains,
+		ctx:         ctx,
 	}, nil
 }
 
+// discoverRaplDomains finds all RAPL domains and their constraints in the system
+func discoverRaplDomains(logger *log.Logger) ([]RaplDomain, error) {
+	var domains []RaplDomain
+
+	// List all RAPL domains
+	entries, err := os.ReadDir(raplBasePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read RAPL base path: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
+			continue
+		}
+
+		domain := RaplDomain{
+			ID: entry.Name(),
+		}
+
+		// Read only direct constraint files in this domain
+		domainPath := filepath.Join(raplBasePath, entry.Name())
+		constraintEntries, err := os.ReadDir(domainPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read domain directory %s: %w", domainPath, err)
+		}
+
+		for _, constEntry := range constraintEntries {
+			name := constEntry.Name()
+			if constEntry.IsDir() {
+				continue // Skip directories
+			}
+
+			// Process only constraint files
+			if !strings.HasPrefix(name, "constraint_") {
+				continue
+			}
+
+			// Extract constraint number from filename
+			constraintNumStr := strings.Split(name, "_")[1]
+			constraintNum, err := strconv.Atoi(constraintNumStr)
+			if err != nil {
+				logger.Printf("Warning: Invalid constraint number in %s: %v", name, err)
+				continue
+			}
+
+			path := filepath.Join(domainPath, name)
+
+			// Process max power constraints
+			if strings.HasSuffix(name, "_max_power_uw") {
+				value, err := readPowerLimit(path)
+				if err != nil {
+					logger.Printf("Warning: Failed to read max power at %s: %v", path, err)
+					value = "0"
+				}
+				domain.ConstraintsMax = append(domain.ConstraintsMax, PowerConstraint{
+					ID:    constraintNum,
+					Path:  path,
+					Value: value,
+				})
+			}
+
+			// Process power limit constraints
+			if strings.HasSuffix(name, "_power_limit_uw") {
+				value, err := readPowerLimit(path)
+				if err != nil {
+					logger.Printf("Warning: Failed to read power limit at %s: %v", path, err)
+					value = "0"
+				}
+				domain.Constraints = append(domain.Constraints, PowerConstraint{
+					ID:    constraintNum,
+					Path:  path,
+					Value: value,
+				})
+			}
+		}
+
+		// Only add domains that have constraints
+		if len(domain.Constraints) > 0 || len(domain.ConstraintsMax) > 0 {
+			domains = append(domains, domain)
+		}
+	}
+
+	return domains, nil
+}
+
+// Helper functions for configuration and setup
 func loadConfig() (*Config, error) {
 	nodeName := os.Getenv(envNodeName)
 	if nodeName == "" {
-		return nil, fmt.Errorf("NODE_NAME environment variable is not set")
+		return nil, fmt.Errorf("%s environment variable is not set", envNodeName)
 	}
 
 	maxSource, err := strconv.ParseFloat(getEnvOrDefault(envMaxSource, defaultMaxSource), 64)
@@ -179,20 +208,17 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid stabilisation time: %w", err)
 	}
 
-	raplLimit, err := strconv.ParseFloat(getEnvOrDefault(envRaplLimit, defaultRaplLimit), 64)
+	raplLimit, err := strconv.ParseInt(getEnvOrDefault(envRaplLimit, defaultRaplLimit), 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid RAPL limit: %w", err)
 	}
 
-	pmaxFunc := getEnvOrDefault(envPmaxFunc, defaultPmaxFunc)
-
 	return &Config{
 		MaxSource:         maxSource,
-		Alpha:            alpha,
+		Alpha:             alpha,
 		StabilisationTime: stabilisationTime,
-		RaplLimit:        raplLimit,
-		PmaxFunc:		 pmaxFunc,
-		NodeName:         nodeName,
+		RaplLimit:         raplLimit,
+		NodeName:          nodeName,
 	}, nil
 }
 
@@ -210,60 +236,11 @@ func createKubernetesClient() (*kubernetes.Clientset, error) {
 	return clientset, nil
 }
 
-// isNodeInitialized checks if the node has already been initialized
-func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
-    if node.Annotations == nil {
-        return false
-    }
-    _, exists := node.Annotations[initializationAnnotation]
-    return exists
-}
-
-// markNodeAsInitialized marks the node as initialized
-func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
-    if node.Annotations == nil {
-        node.Annotations = make(map[string]string)
-    }
-    node.Annotations[initializationAnnotation] = "kcas-power-manager"
-    return pm.updateNode(node)
-}
-
-
-// initializeNode initializes the node with power constraints
-func (pm *PowerManager) initializeNode() error {
-    node, err := pm.getNode()
-    if err != nil {
-        return fmt.Errorf("failed to get node: %w", err)
-    }
-
-	// Check if the node is already initialized
-    if pm.isNodeInitialized(node) {
-        pm.logger.Println("Node already initialized, skipping initialization")
-        return nil
-    }
-
-    if node.Labels == nil {
-        node.Labels = make(map[string]string)
-    }
-
-	// Initialize labels with power constraints for each domain
-    for _, domain := range pm.raplDomains {
-        domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
-        for _, constraint := range domain.Constraints {
-            raplLabel := fmt.Sprintf("rapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-            craplLabel := fmt.Sprintf("crapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-            
-            node.Labels[raplLabel] = constraint.Value
-            node.Labels[craplLabel] = constraint.Value
-        }
-    }
-
-	// Mark the node as initialized
-    if err := pm.markNodeAsInitialized(node); err != nil {
-        return fmt.Errorf("failed to mark node as initialized: %w", err)
-    }
-
-    return nil
+func getEnvOrDefault(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 func readPowerLimit(path string) (string, error) {
@@ -274,60 +251,124 @@ func readPowerLimit(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-
-
+// Node management methods
 func (pm *PowerManager) getNode() (*v1.Node, error) {
-	return pm.clientset.CoreV1().Nodes().Get(context.TODO(), pm.config.NodeName, metav1.GetOptions{})
+	return pm.clientset.CoreV1().Nodes().Get(pm.ctx, pm.config.NodeName, metav1.GetOptions{})
 }
 
 func (pm *PowerManager) updateNode(node *v1.Node) error {
-	_, err := pm.clientset.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+	_, err := pm.clientset.CoreV1().Nodes().Update(pm.ctx, node, metav1.UpdateOptions{})
 	return err
 }
 
-// calculateSourcePower calculates the current source power based on time of day
+func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
+	if node.Annotations == nil {
+		return false
+	}
+	_, exists := node.Annotations[initializationAnnotation]
+	return exists
+}
+
+func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[initializationAnnotation] = "kcas-power-manager"
+	return pm.updateNode(node)
+}
+
+// Power management methods
+func (pm *PowerManager) findMaxPowerValue() (int64, error) {
+	var maxPower int64
+
+	for _, domain := range pm.raplDomains {
+		for _, constraint := range domain.ConstraintsMax {
+			value, err := strconv.ParseInt(constraint.Value, 10, 64)
+			if err != nil {
+				continue // Skip invalid values instead of failing
+			}
+
+			if value > maxPower {
+				maxPower = value
+			}
+		}
+	}
+
+	if maxPower == 0 {
+		return 0, errors.New("no valid max power values found")
+	}
+
+	return maxPower, nil
+}
+
 func (pm *PowerManager) calculateSourcePower() int64 {
 	currentTime := time.Now()
 	t := float64(currentTime.Hour()) + float64(currentTime.Minute())/60.0
 	power := pm.config.MaxSource * math.Pow(math.Sin((math.Pi/16)*(t-4)), pm.config.Alpha)
-	
+
 	if power < 0 {
 		return 0
 	}
-	
+
 	return int64(math.Round(power))
 }
 
-// getDefaultPowerLimits gets current power limits for all domains from node labels
-func (pm *PowerManager) getDefaultPowerLimits(node *v1.Node) (map[string][]int64, error) {
-	powerLimits := make(map[string][]int64)
-	
-	for _, domain := range pm.raplDomains {
-		domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
-		var domainLimits []int64
-		
-		for _, constraint := range domain.Constraints {
-			label := fmt.Sprintf("crapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-			value, ok := node.Labels[label]
-			if !ok {
-				return nil, fmt.Errorf("power limit label not found: %s", label)
-			}
-			
-			limit, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid power limit value: %w", err)
-			}
-			
-			domainLimits = append(domainLimits, limit)
-		}
-		
-		powerLimits[domain.ID] = domainLimits
+func (pm *PowerManager) getMaxPowerValue(node *v1.Node) (int64, error) {
+	if node.Labels == nil {
+		return 0, errors.New("node has no labels")
 	}
-	
-	return powerLimits, nil
+
+	label := "rapl/max_power_uw"
+	value, ok := node.Labels[label]
+	if !ok {
+		return 0, fmt.Errorf("max power label not found: %s", label)
+	}
+
+	maxPower, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid max power value: %w", err)
+	}
+
+	return maxPower, nil
 }
 
-// adjustPowerCap adjusts the power cap based on available source power
+// Main operations
+func (pm *PowerManager) initializeNode() error {
+	node, err := pm.getNode()
+	if err != nil {
+		return fmt.Errorf("failed to get node: %w", err)
+	}
+
+	// Check if the node is already initialized
+	if pm.isNodeInitialized(node) {
+		pm.logger.Println("Node already initialized, skipping initialization")
+		return nil
+	}
+
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+
+	// Find the maximum power value across all domains and constraints
+	maxPower, err := pm.findMaxPowerValue()
+	if err != nil {
+		return fmt.Errorf("failed to find max power value: %w", err)
+	}
+
+	// Store a single value for the node
+	maxPowerValue := strconv.FormatInt(maxPower, 10)
+	node.Labels["rapl/max_power_uw"] = maxPowerValue
+	node.Labels["rapl/pmax"] = maxPowerValue
+
+	// Mark the node as initialized
+	if err := pm.markNodeAsInitialized(node); err != nil {
+		return fmt.Errorf("failed to mark node as initialized: %w", err)
+	}
+
+	pm.logger.Printf("Node initialized with max power: %s µW", maxPowerValue)
+	return nil
+}
+
 func (pm *PowerManager) adjustPowerCap() error {
 	node, err := pm.getNode()
 	if err != nil {
@@ -336,144 +377,89 @@ func (pm *PowerManager) adjustPowerCap() error {
 
 	sourcePower := pm.calculateSourcePower()
 	if sourcePower == 0 {
-		return fmt.Errorf("invalid source power")
+		return errors.New("calculated source power is zero")
 	}
 
-	powerLimits, err := pm.getDefaultPowerLimits(node)
+	maxPower, err := pm.getMaxPowerValue(node)
 	if err != nil {
-		return fmt.Errorf("failed to get current power limits: %w", err)
+		return fmt.Errorf("failed to get max power value: %w", err)
 	}
 
-	pmax, err := pm.getPmax(powerLimits)
-	if err != nil || pmax == 0 {
-		return fmt.Errorf("failed to get Pmax: %w", err)
+	// Determine the power limit to apply
+	var pmax int64 = pm.config.RaplLimit
+
+	if sourcePower > maxPower {
+		pmax = maxPower
+	} else if sourcePower > pm.config.RaplLimit {
+		pmax = sourcePower
 	}
 
-	ratio := float64(sourcePower) / float64(pmax)
-	if ratio > 1 {
-		return nil
-	}
-
-	factor := pm.config.RaplLimit / 100.0
-	if (ratio * 100) >= pm.config.RaplLimit {
-		factor = ratio
-	}
-
-	return pm.applyPowerLimits(node, powerLimits, factor)
+	// Apply the determined power limit
+	pm.logger.Printf("Adjusting power cap to %d µW (source: %d µW, max: %d µW, min: %d µW)", 
+		pmax, sourcePower, maxPower, pm.config.RaplLimit)
+	
+	return pm.applyPowerLimits(node, pmax)
 }
 
+func (pm *PowerManager) applyPowerLimits(node *v1.Node, pmax int64) error {
+	// Update node label for the new calculated limit
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+	node.Labels["rapl/pmax"] = strconv.FormatInt(pmax, 10)
 
-func (pm *PowerManager) getPmax(powerLimits map[string][]int64) (int64, error) {
-    if len(powerLimits) == 0 {
-        return 0, errors.New("powerLimits map is empty")
-    }
+	// Apply this limit to all power_limit_uw files in all domains
+	pmaxStr := strconv.FormatInt(pmax, 10)
+	var applyErrors []string
 
-    var pmax int64
-    var count int
-
-    switch pm.config.PmaxFunc {
-    case "max":
-        pmax = math.MinInt64
-		foundValue := false 
-        for _, limits := range powerLimits {
-            for _, limit := range limits {
-                if limit > pmax {
-                    pmax = limit
-					foundValue = true
-                }
-            }
-        }
-		if !foundValue {
-			return 0, errors.New("no non-zero limits found for max calculation")
-		}
-    case "min":
-        pmax = math.MaxInt64
-        foundNonZero := false // Indicateur pour vérifier si au moins une valeur non nulle a été trouvée
-        for _, limits := range powerLimits {
-            for _, limit := range limits {
-                if limit != 0 && limit < pmax {
-                    pmax = limit
-                    foundNonZero = true
-                }
-            }
-        }
-        if !foundNonZero {
-            return 0, errors.New("no non-zero limits found for min calculation")
-        }
-    case "avg":
-        pmax = 0
-        count = 0
-        for _, limits := range powerLimits {
-            for _, limit := range limits {
-                if limit != 0 {
-                    pmax += limit
-                    count++
-                }
-            }
-        }
-        if count == 0 {
-            return 0, errors.New("no non-zero limits found for average calculation")
-        }
-        pmax /= int64(count)
-    case "sum":
-        pmax = 0
-        for _, limits := range powerLimits {
-            for _, limit := range limits {
-                pmax += limit
-            }
-        }
-    default:
-        return 0, errors.New("unsupported PmaxFunc value")
-    }
-
-    return pmax, nil
-}
-
-// applyPowerLimits applies new power limits to all domains
-func (pm *PowerManager) applyPowerLimits(node *v1.Node, defaultLimits map[string][]int64, factor float64) error {
 	for _, domain := range pm.raplDomains {
-		domainLimits, ok := defaultLimits[domain.ID]
-		if !ok {
-			continue
+		for _, constraint := range domain.Constraints {
+			if err := os.WriteFile(constraint.Path, []byte(pmaxStr), 0644); err != nil {
+				applyErrors = append(applyErrors, fmt.Sprintf("%s: %v", constraint.Path, err))
+			}
 		}
+	}
 
-		domainID := strings.TrimPrefix(domain.ID, "intel-rapl:")
-		
-		for i, constraint := range domain.Constraints {
-			if i >= len(domainLimits) {
-				continue
-			}
-			
-			newLimit := int64(float64(domainLimits[i]) * factor)
-			
-			// Update RAPL file
-			if err := os.WriteFile(constraint.Path, []byte(strconv.FormatInt(newLimit, 10)), 0644); err != nil {
-				pm.logger.Printf("Failed to write power limit to %s: %v", constraint.Path, err)
-				continue
-			}
-			
-			// Update node label
-			label := fmt.Sprintf("rapl%s/constraint_%d_power_limit_uw", domainID, constraint.ID)
-			node.Labels[label] = strconv.FormatInt(newLimit, 10)
-		}
+	if len(applyErrors) > 0 {
+		pm.logger.Printf("Errors applying power limits: %s", strings.Join(applyErrors, "; "))
 	}
 
 	return pm.updateNode(node)
 }
 
+func (pm *PowerManager) Run() {
+	pm.logger.Println("Starting power management cycle...")
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
+	ticker := time.NewTicker(pm.config.StabilisationTime)
+	defer ticker.Stop()
+
+	// Do an initial adjustment
+	if err := pm.adjustPowerCap(); err != nil {
+		pm.logger.Printf("Initial power cap adjustment failed: %v", err)
 	}
-	return defaultValue
+
+	// Set up signal handling for graceful shutdown
+	for {
+		select {
+		case <-ticker.C:
+			if err := pm.adjustPowerCap(); err != nil {
+				pm.logger.Printf("Failed to adjust power cap: %v", err)
+			}
+		case <-pm.ctx.Done():
+			pm.logger.Println("Power manager shutting down...")
+			return
+		}
+	}
 }
 
 func main() {
-	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger := log.New(os.Stdout, "[PowerManager] ", log.LstdFlags|log.Lmicroseconds)
 	logger.Println("Starting power management system...")
 
-	pm, err := NewPowerManager(logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pm, err := NewPowerManager(ctx, logger)
 	if err != nil {
 		logger.Fatalf("Failed to initialize power manager: %v", err)
 	}
@@ -482,12 +468,5 @@ func main() {
 		logger.Fatalf("Failed to initialize node: %v", err)
 	}
 
-	ticker := time.NewTicker(pm.config.StabilisationTime)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if err := pm.adjustPowerCap(); err != nil {
-			logger.Printf("Failed to adjust power cap: %v", err)
-		}
-	}
+	pm.Run() // This will block until context is cancelled
 }
