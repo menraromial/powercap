@@ -1,4 +1,3 @@
-
 # Power Manager for Kubernetes Nodes
 
 ## Overview
@@ -43,19 +42,95 @@ The application relies on the following environment variables:
 | ALPHA              | Adjustment factor                 | 4               |
 | RAPL_MIN_POWER     | Minimum power limit in µW        | 10000000        |
 
-## Usage
-1. Set up environment variables:
-   ```sh
-   export NODE_NAME="node-1"
-   export MAX_SOURCE="40000000"
-   export STABILISATION_TIME="300"
-   export ALPHA="4"
-   export RAPL_MIN_POWER="10000000"
-   ```
-2. Start the power manager:
-   ```sh
-   ./power-manager
-   ```
+## Kubernetes Deployment
+To deploy the Power Manager as a DaemonSet in your Kubernetes cluster, apply the following YAML configuration:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: powercap
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: powercap
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: powercap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: powercap
+subjects:
+  - kind: ServiceAccount
+    name: powercap
+    namespace: default
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: powercap
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      name: powercap
+  template:
+    metadata:
+      labels:
+        name: powercap
+    spec:
+      serviceAccountName: powercap
+      containers:
+        - name: powercap
+          image: menraromial/powercap:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: ["SYS_ADMIN"]
+          env:
+            - name: MAX_SOURCE
+              value: "140000000"
+            - name: RAPL_LIMIT
+              value: "40"
+            - name: STABILISATION_TIME
+              value: "120"
+            - name: ALPHA
+              value: "4"
+            - name: PMAX_FUNC
+              value: min
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+          - name: intel-rapl
+            mountPath: /sys/devices/virtual/powercap/intel-rapl
+      volumes:
+      - name: intel-rapl
+        hostPath:
+          path: /sys/devices/virtual/powercap/intel-rapl
+          type: Directory
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+```
+
 
 ## How It Works
 - The Power Manager discovers available RAPL power domains on the node.
