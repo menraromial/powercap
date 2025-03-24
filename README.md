@@ -1,4 +1,4 @@
-# powercap
+
 # Power Manager for Kubernetes Nodes
 
 ## Overview
