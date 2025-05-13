@@ -19,16 +19,16 @@ This project is a Kubernetes-based power management tool designed to monitor and
 ## Installation
 1. Clone the repository:
    ```sh
-   git clone <repository_url>
-   cd <repository_folder>
+   git clone https://github.com/menraromial/powercap.git
+   cd powercap
    ```
 2. Build the binary:
    ```sh
-   go build -o power-manager main.go
+   go build -o powercap main.go
    ```
 3. Run the application:
    ```sh
-   ./power-manager
+   ./powercap
    ```
 
 ## Environment Variables
