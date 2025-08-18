@@ -94,7 +94,7 @@ spec:
       serviceAccountName: powercap
       containers:
         - name: powercap
-          image: menraromial/powercap:latest
+          image: ghcr.io/menraromial/powercap:sha-7d14609
           imagePullPolicy: Always
           securityContext:
             privileged: true
@@ -105,14 +105,12 @@ spec:
           env:
             - name: MAX_SOURCE
               value: "140000000"
-            - name: RAPL_LIMIT
-              value: "40"
+            - name: RAPL_MIN_POWER
+              value: "11000000"
             - name: STABILISATION_TIME
               value: "120"
             - name: ALPHA
               value: "4"
-            - name: PMAX_FUNC
-              value: min
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -129,6 +127,7 @@ spec:
         - key: node-role.kubernetes.io/master
           operator: Exists
           effect: NoSchedule
+
 ```
 
 
