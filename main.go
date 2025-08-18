@@ -282,13 +282,17 @@ func (pm *PowerManager) findMaxPowerValue() (int64, error) {
 	var maxPower int64
 
 	for _, domain := range pm.raplDomains {
+		// Check Constraints
+		for _, constraint := range domain.Constraints {
+			value, err := strconv.ParseInt(constraint.Value, 10, 64)
+			if err == nil && value > maxPower {
+				maxPower = value
+			}
+		}
+		// Check ConstraintsMax
 		for _, constraint := range domain.ConstraintsMax {
 			value, err := strconv.ParseInt(constraint.Value, 10, 64)
-			if err != nil {
-				continue // Skip invalid values instead of failing
-			}
-
-			if value > maxPower {
+			if err == nil && value > maxPower {
 				maxPower = value
 			}
 		}
