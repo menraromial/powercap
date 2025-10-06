@@ -8,7 +8,7 @@ name: Build and Push Docker Image
 # It will also run on version tags (v*.*.*)
 on:
   push:
-    branches: [ "main" ]
+    #branches: [ "main" ]
     paths-ignore:
       - 'analysis/**'
       - 'test/**'
