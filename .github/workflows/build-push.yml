@@ -5,6 +5,7 @@ name: Build and Push Docker Image
 # This section defines the trigger for the workflow.
 # It will run automatically on every push to the 'main' branch,
 # EXCEPT when changes are only in the specified ignored paths.
+# It will also run on version tags (v*.*.*)
 on:
   push:
     branches: [ "main" ]
@@ -13,16 +14,20 @@ on:
       - 'test/**'
       - 'simulate/**'
       - 'results/**'
+      - 'scripts/**'
       - 'Makefile'
       - 'makefile'
       - 'README.md'
       - 'readme.md'
       - 'README.txt'
+      - 'README**'
       - 'readme.txt'
       - '*.pdf'
       - '.gitignore'
       - 'hack/**'
       - 'config/**'
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v0.0.4, v1.2.3, etc.
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel.
 jobs:
@@ -55,18 +60,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Step 3: Extract metadata (tags and labels) for the Docker image
-      # This is a best practice. It automatically generates useful tags like 'latest'
-      # and a tag based on the git commit SHA for perfect traceability.
+      # This automatically generates tags:
+      # - 'latest' for main branch pushes
+      # - version tags (e.g., 'v0.0.4') for version tag pushes
+      # - git commit SHA for traceability
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }} # e.g., ghcr.io/your-username/elara
+          images: ghcr.io/${{ github.repository }} # e.g., ghcr.io/menraromial/powercap
           tags: |
             # Tag with 'latest' for the main branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with the git commit SHA
-            type=sha
+            # Tag with version for version tags (e.g., v0.0.4)
+            type=ref,event=tag
+            # Tag with the git commit SHA for traceability
+            type=sha,prefix={{branch}}-
 
       # Step 4: Build and push the Docker image to GHCR
       # This action uses the metadata from the previous step to build and push the image.

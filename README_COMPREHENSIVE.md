@@ -381,6 +381,31 @@ kubectl apply -k k8s/overlays/staging
 kubectl apply -k k8s/overlays/development
 ```
 
+## 🏷️ Docker Images & Releases
+
+### **Available Images**
+```yaml
+# Latest development version
+image: ghcr.io/menraromial/powercap:latest
+
+# Specific stable version (recommended for production)
+image: ghcr.io/menraromial/powercap:v0.0.4
+```
+
+### **Creating Releases**
+```bash
+# Auto-increment and release
+./scripts/tag-version.sh --patch --push
+
+# Specific version
+./scripts/tag-version.sh 0.0.5 --push
+
+# Preview release
+./scripts/tag-version.sh 0.0.5 --dry-run
+```
+
+**See [RELEASES.md](RELEASES.md) for complete release documentation.**
+
 ## 📊 Monitoring & Observability
 
 ### **Kubernetes Annotations for Monitoring:**
