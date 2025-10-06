@@ -54,9 +54,11 @@ type Config struct {
 
 // Load loads configuration from environment variables
 func Load() (*Config, error) {
+	// NODE_NAME is required for Kubernetes, but we can provide a default for local testing
 	nodeName := os.Getenv(EnvNodeName)
 	if nodeName == "" {
-		return nil, fmt.Errorf("%s environment variable is not set", EnvNodeName)
+		// For local/Docker testing, use a default node name
+		nodeName = "local-node"
 	}
 
 	maxSource, err := strconv.ParseFloat(getEnvOrDefault(EnvMaxSource, DefaultMaxSource), 64)
