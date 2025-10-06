@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: powercap-manager
+  namespace: default
+  labels:
+    app: powercap-manager
+spec:
+  selector:
+    matchLabels:
+      app: powercap-manager
+  template:
+    metadata:
+      labels:
+        app: powercap-manager
+    spec:
+      serviceAccountName: powercap-manager
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: powercap-manager
+        image: powercap:latest
+        imagePullPolicy: Never  # Change to Always for production
+        securityContext:
+          privileged: true  # Required for RAPL access
+          runAsUser: 0
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        envFrom:
+        - configMapRef:
+            name: powercap-config  # Default config, can be overridden
+        volumeMounts:
+        - name: rapl
+          mountPath: /sys/devices/virtual/powercap
+          readOnly: false
+        - name: data-storage
+          mountPath: /app/data
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+        livenessProbe:
+          exec:
+            command:
+            - pgrep
+            - -f
+            - powercap
+          initialDelaySeconds: 30
+          periodSeconds: 60
+        readinessProbe:
+          exec:
+            command:
+            - pgrep
+            - -f
+            - powercap
+          initialDelaySeconds: 10
+          periodSeconds: 30
+      volumes:
+      - name: rapl
+        hostPath:
+          path: /sys/devices/virtual/powercap
+          type: Directory
+      - name: data-storage
+        hostPath:
+          path: /var/lib/powercap  # Host directory for CSV files
+          type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+# Example: DaemonSet with Mock provider for testing
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: powercap-manager-mock
+  namespace: default
+  labels:
+    app: powercap-manager-mock
+spec:
+  selector:
+    matchLabels:
+      app: powercap-manager-mock
+  template:
+    metadata:
+      labels:
+        app: powercap-manager-mock
+    spec:
+      serviceAccountName: powercap-manager
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: powercap-manager
+        image: powercap:latest
+        imagePullPolicy: Never
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        envFrom:
+        - configMapRef:
+            name: powercap-config-mock  # Mock provider config
+        volumeMounts:
+        - name: rapl
+          mountPath: /sys/devices/virtual/powercap
+          readOnly: false
+        - name: data-storage
+          mountPath: /app/data
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+      volumes:
+      - name: rapl
+        hostPath:
+          path: /sys/devices/virtual/powercap
+          type: Directory
+      - name: data-storage
+        hostPath:
+          path: /var/lib/powercap-mock
+          type: DirectoryOrCreate
+      restartPolicy: Always

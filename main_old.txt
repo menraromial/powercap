@@ -1,0 +1,867 @@
+package main
+
+import (
+	"context"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+)
+
+// Configuration constants
+const (
+	raplBasePath = "/sys/devices/virtual/powercap/intel-rapl"
+
+	// Environment variable names
+	envNodeName          = "NODE_NAME"
+	envMaxSource         = "MAX_SOURCE"
+	envStabilisationTime = "STABILISATION_TIME"
+	envAlpha             = "ALPHA"
+	envRaplLimit         = "RAPL_MIN_POWER"
+
+	// Default values
+	defaultMaxSource         = "40000000"
+	defaultStabilisationTime = "300"
+	defaultAlpha             = "4"
+	defaultRaplLimit         = "10000000"
+
+	initializationAnnotation = "power-manager/initialized"
+)
+
+// Configuration types
+type (
+	// MarketData represents raw scraped EPEX market data
+	MarketData struct {
+		Period string
+		Volume string
+		Price  string
+	}
+
+	// EpexData represents EPEX market data for a 15-minute period
+	EpexData struct {
+		Period string  // e.g., "00:00-00:15"
+		Volume float64 // Volume in MWh
+		Price  float64 // Price in €/MWh
+	}
+
+	// RaplDomain represents a RAPL domain with its constraints
+	RaplDomain struct {
+		ID             string // e.g., "intel-rapl:0"
+		Constraints    []PowerConstraint
+		ConstraintsMax []PowerConstraint
+	}
+
+	// PowerConstraint represents a RAPL power constraint configuration
+	PowerConstraint struct {
+		ID    int    // constraint number (0, 1, etc.)
+		Path  string // full path to the constraint file
+		Value string // current power limit value
+	}
+
+	// Config holds the application configuration
+	Config struct {
+		MaxSource         float64
+		Alpha             float64
+		StabilisationTime time.Duration
+		RaplLimit         int64
+		NodeName          string
+	}
+
+	// PowerManager handles power management operations
+	PowerManager struct {
+		clientset   *kubernetes.Clientset
+		config      *Config
+		logger      *log.Logger
+		raplDomains []RaplDomain
+		epexData    []EpexData
+		ctx         context.Context
+	}
+)
+
+// NewPowerManager creates and initializes a new PowerManager
+func NewPowerManager(ctx context.Context, logger *log.Logger) (*PowerManager, error) {
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	clientset, err := createKubernetesClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+
+	domains, err := discoverRaplDomains(logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover RAPL domains: %w", err)
+	}
+
+	epexData, err := loadEpexData(logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load EPEX data: %w", err)
+	}
+
+	logger.Printf("Discovered %d RAPL domains", len(domains))
+	logger.Printf("Loaded %d EPEX data points", len(epexData))
+
+	return &PowerManager{
+		clientset:   clientset,
+		config:      config,
+		logger:      logger,
+		raplDomains: domains,
+		epexData:    epexData,
+		ctx:         ctx,
+	}, nil
+}
+
+// discoverRaplDomains finds all RAPL domains and their constraints in the system
+func discoverRaplDomains(logger *log.Logger) ([]RaplDomain, error) {
+	var domains []RaplDomain
+
+	// List all RAPL domains
+	entries, err := os.ReadDir(raplBasePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read RAPL base path: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
+			continue
+		}
+
+		domain := RaplDomain{
+			ID: entry.Name(),
+		}
+
+		// Read only direct constraint files in this domain
+		domainPath := filepath.Join(raplBasePath, entry.Name())
+		constraintEntries, err := os.ReadDir(domainPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read domain directory %s: %w", domainPath, err)
+		}
+
+		for _, constEntry := range constraintEntries {
+			name := constEntry.Name()
+			if constEntry.IsDir() {
+				continue // Skip directories
+			}
+
+			// Process only constraint files
+			if !strings.HasPrefix(name, "constraint_") {
+				continue
+			}
+
+			// Extract constraint number from filename
+			constraintNumStr := strings.Split(name, "_")[1]
+			constraintNum, err := strconv.Atoi(constraintNumStr)
+			if err != nil {
+				logger.Printf("Warning: Invalid constraint number in %s: %v", name, err)
+				continue
+			}
+
+			path := filepath.Join(domainPath, name)
+
+			// Process max power constraints
+			if strings.HasSuffix(name, "_max_power_uw") {
+				value, err := readPowerLimit(path)
+				if err != nil {
+					logger.Printf("Warning: Failed to read max power at %s: %v", path, err)
+					value = "0"
+				}
+				domain.ConstraintsMax = append(domain.ConstraintsMax, PowerConstraint{
+					ID:    constraintNum,
+					Path:  path,
+					Value: value,
+				})
+			}
+
+			// Process power limit constraints
+			if strings.HasSuffix(name, "_power_limit_uw") {
+				value, err := readPowerLimit(path)
+				if err != nil {
+					logger.Printf("Warning: Failed to read power limit at %s: %v", path, err)
+					value = "0"
+				}
+				domain.Constraints = append(domain.Constraints, PowerConstraint{
+					ID:    constraintNum,
+					Path:  path,
+					Value: value,
+				})
+			}
+		}
+
+		// Only add domains that have constraints
+		if len(domain.Constraints) > 0 || len(domain.ConstraintsMax) > 0 {
+			domains = append(domains, domain)
+		}
+	}
+
+	return domains, nil
+}
+
+// loadEpexData loads EPEX market data from CSV file
+func loadEpexData(logger *log.Logger) ([]EpexData, error) {
+	// Generate filename for today's data
+	today := time.Now().Format("2006-01-02")
+	epexDataFile := fmt.Sprintf("epex_data_%s.csv", today)
+
+	// Check if file exists, if not try to generate it
+	if _, err := os.Stat(epexDataFile); os.IsNotExist(err) {
+		logger.Printf("EPEX data file %s not found, attempting to generate...", epexDataFile)
+		if err := generateEpexData(logger); err != nil {
+			logger.Printf("Failed to generate EPEX data: %v", err)
+			// Try yesterday's file as fallback
+			yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+			epexDataFile = fmt.Sprintf("epex_data_%s.csv", yesterday)
+			logger.Printf("Trying fallback file: %s", epexDataFile)
+		}
+	}
+
+	file, err := os.Open(epexDataFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open EPEX data file %s: %w", epexDataFile, err)
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CSV data: %w", err)
+	}
+
+	if len(records) < 2 {
+		return nil, fmt.Errorf("CSV file has insufficient data")
+	}
+
+	// Skip header row
+	var epexData []EpexData
+	for i, record := range records[1:] {
+		if len(record) != 3 {
+			logger.Printf("Warning: Skipping malformed record at line %d", i+2)
+			continue
+		}
+
+		volume, err := strconv.ParseFloat(record[1], 64)
+		if err != nil {
+			logger.Printf("Warning: Invalid volume at line %d: %v", i+2, err)
+			continue
+		}
+
+		price, err := strconv.ParseFloat(record[2], 64)
+		if err != nil {
+			logger.Printf("Warning: Invalid price at line %d: %v", i+2, err)
+			continue
+		}
+
+		epexData = append(epexData, EpexData{
+			Period: record[0],
+			Volume: volume,
+			Price:  price,
+		})
+	}
+
+	return epexData, nil
+}
+
+// generateEpexData generates today's EPEX data by scraping
+func generateEpexData(logger *log.Logger) error {
+	logger.Println("Starting EPEX data collection...")
+
+	today := time.Now()
+	tradingDate := today.AddDate(0, 0, -1).Format("2006-01-02")
+	deliveryDate := today.Format("2006-01-02")
+
+	logger.Printf("Trading date: %s, Delivery date: %s", tradingDate, deliveryDate)
+
+	data, err := scrapeEPEXData(tradingDate, deliveryDate)
+	if err != nil {
+		return fmt.Errorf("scraping failed: %w", err)
+	}
+
+	if len(data) == 0 {
+		return fmt.Errorf("no data retrieved")
+	}
+
+	logger.Printf("Retrieved %d data points", len(data))
+
+	filename := fmt.Sprintf("epex_data_%s.csv", deliveryDate)
+	if err := saveToCSV(data, filename); err != nil {
+		return fmt.Errorf("failed to save CSV: %w", err)
+	}
+
+	logger.Printf("Successfully saved data to %s", filename)
+	return nil
+}
+
+// scrapeEPEXData scrapes EPEX market data for given dates
+func scrapeEPEXData(tradingDate, deliveryDate string) ([]MarketData, error) {
+	var data []MarketData
+
+	url := fmt.Sprintf(
+		"https://www.epexspot.com/en/market-results?market_area=FR&auction=IDA1&trading_date=%s&delivery_date=%s&underlying_year=&modality=Auction&sub_modality=Intraday&technology=&data_mode=table&period=&production_period=",
+		tradingDate, deliveryDate,
+	)
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("request creation error: %w", err)
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("body read error: %w", err)
+	}
+
+	htmlContent := string(body)
+
+	// Extract periods from fixed column links
+	periods := extractPeriods(htmlContent)
+
+	// Extract data from tbody
+	volumes, prices := extractTableData(htmlContent)
+
+	// Combine data
+	minLen := minInt(len(periods), len(volumes), len(prices))
+
+	for i := 0; i < minLen; i++ {
+		data = append(data, MarketData{
+			Period: periods[i],
+			Volume: volumes[i],
+			Price:  prices[i],
+		})
+	}
+
+	return data, nil
+}
+
+// minInt returns the minimum of three integers
+func minInt(a, b, c int) int {
+	result := a
+	if b < result {
+		result = b
+	}
+	if c < result {
+		result = c
+	}
+	return result
+}
+
+// extractPeriods extracts time periods from HTML
+func extractPeriods(html string) []string {
+	var periods []string
+
+	// Regex to find periods in links: <a href="#">HH:MM - HH:MM</a>
+	re := regexp.MustCompile(`<a href="#">(\d{2}:\d{2}\s*-\s*\d{2}:\d{2})</a>`)
+	matches := re.FindAllStringSubmatch(html, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			period := strings.ReplaceAll(match[1], " ", "")
+			periods = append(periods, period)
+		}
+	}
+
+	return periods
+}
+
+// extractTableData extracts volume and price data from HTML table
+func extractTableData(html string) ([]string, []string) {
+	var volumes []string
+	var prices []string
+
+	// Find tbody section
+	tbodyStart := strings.Index(html, "<tbody>")
+	tbodyEnd := strings.Index(html, "</tbody>")
+
+	if tbodyStart == -1 || tbodyEnd == -1 {
+		return volumes, prices
+	}
+
+	tbodyContent := html[tbodyStart:tbodyEnd]
+
+	// Regex for <tr> lines
+	trRe := regexp.MustCompile(`<tr\s+class="child[^"]*"[^>]*>([\s\S]*?)</tr>`)
+	trMatches := trRe.FindAllStringSubmatch(tbodyContent, -1)
+
+	if len(trMatches) == 0 {
+		return extractTableDataAlternative(tbodyContent)
+	}
+
+	for _, trMatch := range trMatches {
+		if len(trMatch) < 2 {
+			continue
+		}
+
+		rowContent := trMatch[1]
+
+		// Extract all <td> cells
+		tdRe := regexp.MustCompile(`<td[^>]*>([^<]+)</td>`)
+		tdMatches := tdRe.FindAllStringSubmatch(rowContent, -1)
+
+		// Each row should have 4 columns: Buy Volume, Sell Volume, Volume, Price
+		if len(tdMatches) == 4 {
+			volume := strings.TrimSpace(tdMatches[2][1]) // 3rd column = Volume
+			price := strings.TrimSpace(tdMatches[3][1])  // 4th column = Price
+
+			volumes = append(volumes, volume)
+			prices = append(prices, price)
+		}
+	}
+
+	return volumes, prices
+}
+
+// extractTableDataAlternative alternative extraction method
+func extractTableDataAlternative(tbodyContent string) ([]string, []string) {
+	var volumes []string
+	var prices []string
+
+	// Search directly for all <td> cells
+	tdRe := regexp.MustCompile(`<td[^>]*>([^<]+)</td>`)
+	tdMatches := tdRe.FindAllStringSubmatch(tbodyContent, -1)
+
+	// Data is in groups of 4: Buy, Sell, Volume, Price
+	for i := 0; i+3 < len(tdMatches); i += 4 {
+		volume := strings.TrimSpace(tdMatches[i+2][1]) // 3rd column
+		price := strings.TrimSpace(tdMatches[i+3][1])  // 4th column
+
+		volumes = append(volumes, volume)
+		prices = append(prices, price)
+	}
+
+	return volumes, prices
+}
+
+// saveToCSV saves market data to CSV file
+func saveToCSV(data []MarketData, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("file creation error: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// CSV header
+	header := []string{"Period", "Volume (MWh)", "Price (€/MWh)"}
+	if err := writer.Write(header); err != nil {
+		return fmt.Errorf("header write error: %w", err)
+	}
+
+	// Write data
+	for _, record := range data {
+		row := []string{record.Period, record.Volume, record.Price}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("data write error: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Helper functions for configuration and setup
+func loadConfig() (*Config, error) {
+	nodeName := os.Getenv(envNodeName)
+	if nodeName == "" {
+		return nil, fmt.Errorf("%s environment variable is not set", envNodeName)
+	}
+
+	maxSource, err := strconv.ParseFloat(getEnvOrDefault(envMaxSource, defaultMaxSource), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid max source value: %w", err)
+	}
+
+	alpha, err := strconv.ParseFloat(getEnvOrDefault(envAlpha, defaultAlpha), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid alpha value: %w", err)
+	}
+
+	stabilisationTime, err := time.ParseDuration(getEnvOrDefault(envStabilisationTime, defaultStabilisationTime) + "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid stabilisation time: %w", err)
+	}
+
+	raplLimit, err := strconv.ParseInt(getEnvOrDefault(envRaplLimit, defaultRaplLimit), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid RAPL limit: %w", err)
+	}
+
+	return &Config{
+		MaxSource:         maxSource,
+		Alpha:             alpha,
+		StabilisationTime: stabilisationTime,
+		RaplLimit:         raplLimit,
+		NodeName:          nodeName,
+	}, nil
+}
+
+func createKubernetesClient() (*kubernetes.Clientset, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes clientset: %w", err)
+	}
+
+	return clientset, nil
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func readPowerLimit(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// Node management methods
+func (pm *PowerManager) getNode() (*v1.Node, error) {
+	return pm.clientset.CoreV1().Nodes().Get(pm.ctx, pm.config.NodeName, metav1.GetOptions{})
+}
+
+func (pm *PowerManager) updateNode(node *v1.Node) error {
+	_, err := pm.clientset.CoreV1().Nodes().Update(pm.ctx, node, metav1.UpdateOptions{})
+	return err
+}
+
+func (pm *PowerManager) isNodeInitialized(node *v1.Node) bool {
+	if node.Annotations == nil {
+		return false
+	}
+	_, exists := node.Annotations[initializationAnnotation]
+	return exists
+}
+
+func (pm *PowerManager) markNodeAsInitialized(node *v1.Node) error {
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[initializationAnnotation] = "kcas-power-manager"
+	return pm.updateNode(node)
+}
+
+// Power management methods
+func (pm *PowerManager) findMaxPowerValue() (int64, error) {
+	var maxPower int64
+
+	for _, domain := range pm.raplDomains {
+		// Check Constraints
+		for _, constraint := range domain.Constraints {
+			value, err := strconv.ParseInt(constraint.Value, 10, 64)
+			if err == nil && value > maxPower {
+				maxPower = value
+			}
+		}
+		// Check ConstraintsMax
+		for _, constraint := range domain.ConstraintsMax {
+			value, err := strconv.ParseInt(constraint.Value, 10, 64)
+			if err == nil && value > maxPower {
+				maxPower = value
+			}
+		}
+	}
+
+	if maxPower == 0 {
+		return 0, errors.New("no valid max power values found")
+	}
+
+	return maxPower, nil
+}
+
+func (pm *PowerManager) calculateSourcePower() int64 {
+	currentTime := time.Now()
+	currentHour := currentTime.Hour()
+	currentMinute := currentTime.Minute()
+
+	// Determine the 15-minute period
+	periodStart := (currentMinute / 15) * 15
+	periodEnd := periodStart + 15
+	var periodStr string
+
+	if periodEnd == 60 {
+		// Handle transition to next hour
+		periodStr = fmt.Sprintf("%02d:%02d-%02d:00", currentHour, periodStart, (currentHour+1)%24)
+	} else {
+		periodStr = fmt.Sprintf("%02d:%02d-%02d:%02d", currentHour, periodStart, currentHour, periodEnd)
+	}
+
+	// Handle special case for the last period of the day
+	if currentHour == 23 && periodStart == 45 {
+		periodStr = "23:45-24:00"
+	}
+
+	// Find current period data
+	var currentVolume float64
+	for _, data := range pm.epexData {
+		if data.Period == periodStr {
+			currentVolume = data.Volume
+			break
+		}
+	}
+
+	// If no data found, fallback to 0
+	if currentVolume == 0 {
+		pm.logger.Printf("No EPEX data found for period %s, using 0", periodStr)
+		return 0
+	}
+
+	// Find max volume in the dataset
+	maxVolume := 0.0
+	for _, data := range pm.epexData {
+		if data.Volume > maxVolume {
+			maxVolume = data.Volume
+		}
+	}
+
+	// Apply rule of three: if MaxSource corresponds to maxVolume, what corresponds to currentVolume?
+	// power = (currentVolume / maxVolume) * MaxSource
+	if maxVolume == 0 {
+		return 0
+	}
+
+	power := (currentVolume / maxVolume) * pm.config.MaxSource
+	pm.logger.Printf("EPEX calculation: period=%s, volume=%0.1f/%0.1f MWh, power=%0.0f µW",
+		periodStr, currentVolume, maxVolume, power)
+	return int64(math.Round(power))
+}
+
+func (pm *PowerManager) getMaxPowerValue(node *v1.Node) (int64, error) {
+	if node.Labels == nil {
+		return 0, errors.New("node has no labels")
+	}
+
+	label := "rapl/max_power_uw"
+	value, ok := node.Labels[label]
+	if !ok {
+		return 0, fmt.Errorf("max power label not found: %s", label)
+	}
+
+	maxPower, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid max power value: %w", err)
+	}
+
+	return maxPower, nil
+}
+
+// Main operations
+func (pm *PowerManager) initializeNode() error {
+	node, err := pm.getNode()
+	if err != nil {
+		return fmt.Errorf("failed to get node: %w", err)
+	}
+
+	// Check if the node is already initialized
+	if pm.isNodeInitialized(node) {
+		pm.logger.Println("Node already initialized, skipping initialization")
+		return nil
+	}
+
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+
+	// Find the maximum power value across all domains and constraints
+	maxPower, err := pm.findMaxPowerValue()
+	if err != nil {
+		return fmt.Errorf("failed to find max power value: %w", err)
+	}
+
+	// Store a single value for the node
+	maxPowerValue := strconv.FormatInt(maxPower, 10)
+	node.Labels["rapl/max_power_uw"] = maxPowerValue
+	node.Labels["rapl/pmax"] = maxPowerValue
+
+	// Mark the node as initialized
+	if err := pm.markNodeAsInitialized(node); err != nil {
+		return fmt.Errorf("failed to mark node as initialized: %w", err)
+	}
+
+	pm.logger.Printf("Node initialized with max power: %s µW", maxPowerValue)
+	return nil
+}
+
+func (pm *PowerManager) adjustPowerCap() error {
+	node, err := pm.getNode()
+	if err != nil {
+		return fmt.Errorf("failed to get node: %w", err)
+	}
+
+	sourcePower := pm.calculateSourcePower()
+	if sourcePower == 0 {
+		return errors.New("calculated source power is zero")
+	}
+
+	maxPower, err := pm.getMaxPowerValue(node)
+	if err != nil {
+		return fmt.Errorf("failed to get max power value: %w", err)
+	}
+
+	// Determine the power limit to apply
+	var pmax int64 = pm.config.RaplLimit
+
+	if sourcePower > maxPower {
+		pmax = maxPower
+	} else if sourcePower > pm.config.RaplLimit {
+		pmax = sourcePower
+	}
+
+	// Apply the determined power limit
+	pm.logger.Printf("Adjusting power cap to %d µW (source: %d µW, max: %d µW, min: %d µW)",
+		pmax, sourcePower, maxPower, pm.config.RaplLimit)
+
+	return pm.applyPowerLimits(node, pmax)
+}
+
+func (pm *PowerManager) applyPowerLimits(node *v1.Node, pmax int64) error {
+	// Update node label for the new calculated limit
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+	node.Labels["rapl/pmax"] = strconv.FormatInt(pmax, 10)
+
+	// Apply this limit to all power_limit_uw files in all domains
+	pmaxStr := strconv.FormatInt(pmax, 10)
+	var applyErrors []string
+
+	for _, domain := range pm.raplDomains {
+		for _, constraint := range domain.Constraints {
+			if err := os.WriteFile(constraint.Path, []byte(pmaxStr), 0644); err != nil {
+				applyErrors = append(applyErrors, fmt.Sprintf("%s: %v", constraint.Path, err))
+			}
+		}
+	}
+
+	if len(applyErrors) > 0 {
+		pm.logger.Printf("Errors applying power limits: %s", strings.Join(applyErrors, "; "))
+	}
+
+	return pm.updateNode(node)
+}
+
+func (pm *PowerManager) Run() {
+	pm.logger.Println("Starting power management cycle...")
+
+	ticker := time.NewTicker(pm.config.StabilisationTime)
+	defer ticker.Stop()
+
+	// Schedule daily EPEX data generation at midnight
+	dailyTicker := pm.scheduleDailyEpexGeneration()
+	defer dailyTicker.Stop()
+
+	// Do an initial adjustment
+	if err := pm.adjustPowerCap(); err != nil {
+		pm.logger.Printf("Initial power cap adjustment failed: %v", err)
+	}
+
+	// Set up signal handling for graceful shutdown
+	for {
+		select {
+		case <-ticker.C:
+			if err := pm.adjustPowerCap(); err != nil {
+				pm.logger.Printf("Failed to adjust power cap: %v", err)
+			}
+		case <-pm.ctx.Done():
+			pm.logger.Println("Power manager shutting down...")
+			return
+		}
+	}
+}
+
+// scheduleDailyEpexGeneration sets up a ticker to trigger EPEX data generation at midnight
+func (pm *PowerManager) scheduleDailyEpexGeneration() *time.Ticker {
+	now := time.Now()
+
+	// Calculate time until next midnight
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	timeUntilMidnight := nextMidnight.Sub(now)
+
+	pm.logger.Printf("Next EPEX data generation scheduled in %v (at %v)", timeUntilMidnight, nextMidnight.Format("2006-01-02 15:04:05"))
+
+	// Create a ticker for 24-hour intervals
+	ticker := time.NewTicker(24 * time.Hour)
+
+	// Schedule the first execution at midnight
+	go func() {
+		time.Sleep(timeUntilMidnight)
+		pm.logger.Println("Midnight reached - triggering first EPEX data generation...")
+		if err := generateEpexData(pm.logger); err != nil {
+			pm.logger.Printf("Failed to generate EPEX data at midnight: %v", err)
+		} else {
+			pm.logger.Println("Midnight EPEX data generation completed successfully")
+			// Reload EPEX data in memory
+			if newEpexData, err := loadEpexData(pm.logger); err == nil {
+				pm.epexData = newEpexData
+				pm.logger.Printf("Reloaded %d EPEX data points", len(pm.epexData))
+			}
+		}
+	}()
+
+	return ticker
+}
+
+func main() {
+	logger := log.New(os.Stdout, "[PowerManager] ", log.LstdFlags|log.Lmicroseconds)
+	logger.Println("Starting power management system...")
+
+	// Check if we should run in test mode to generate EPEX data
+	if len(os.Args) > 1 && os.Args[1] == "test-epex" {
+		logger.Println("Running in EPEX test mode...")
+		if err := generateEpexData(logger); err != nil {
+			logger.Fatalf("Failed to generate EPEX data: %v", err)
+		}
+		logger.Println("EPEX data generation test completed successfully")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pm, err := NewPowerManager(ctx, logger)
+	if err != nil {
+		logger.Fatalf("Failed to initialize power manager: %v", err)
+	}
+
+	if err := pm.initializeNode(); err != nil {
+		logger.Fatalf("Failed to initialize node: %v", err)
+	}
+
+	pm.Run() // This will block until context is cancelled
+}

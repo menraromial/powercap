@@ -1,0 +1,76 @@
+# ConfigMap for Power Manager configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: powercap-config
+  namespace: default
+data:
+  # Power management settings
+  MAX_SOURCE: "40000000"
+  STABILISATION_TIME: "300"
+  ALPHA: "4"
+  RAPL_MIN_POWER: "10000000"
+  
+  # Data provider configuration
+  DATA_PROVIDER: "epex"
+  PROVIDER_URL: "https://www.epexspot.com/en/market-results"
+  DATA_REFRESH_CRON: "0 0 * * *"
+  
+  # Provider parameters (JSON format)
+  PROVIDER_PARAMS: |
+    {
+      "market_area": "FR",
+      "auction": "IDA1",
+      "modality": "Auction",
+      "sub_modality": "Intraday",
+      "data_mode": "table"
+    }
+
+---
+# ConfigMap for alternative providers examples
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: powercap-config-mock
+  namespace: default
+data:
+  # Power management settings (same as above)
+  MAX_SOURCE: "40000000"
+  STABILISATION_TIME: "300"
+  ALPHA: "4"
+  RAPL_MIN_POWER: "10000000"
+  
+  # Mock provider configuration
+  DATA_PROVIDER: "mock"
+  PROVIDER_URL: ""
+  DATA_REFRESH_CRON: "0 0 * * *"
+  PROVIDER_PARAMS: "{}"
+
+---
+# ConfigMap for different market areas
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: powercap-config-epex-de
+  namespace: default
+data:
+  # Power management settings
+  MAX_SOURCE: "35000000"
+  STABILISATION_TIME: "300"
+  ALPHA: "4"
+  RAPL_MIN_POWER: "8000000"
+  
+  # EPEX provider for German market
+  DATA_PROVIDER: "epex"
+  PROVIDER_URL: "https://www.epexspot.com/en/market-results"
+  DATA_REFRESH_CRON: "0 0 * * *"
+  
+  # German market parameters
+  PROVIDER_PARAMS: |
+    {
+      "market_area": "DE",
+      "auction": "IDA1",
+      "modality": "Auction",
+      "sub_modality": "Intraday",
+      "data_mode": "table"
+    }

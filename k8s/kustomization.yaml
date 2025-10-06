@@ -1,0 +1,53 @@
+# Kustomization file for easy deployment and configuration management
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- rbac.yaml
+- configmap.yaml
+- daemonset.yaml
+
+# Common labels
+commonLabels:
+  app.kubernetes.io/name: powercap-manager
+  app.kubernetes.io/version: v1.0.0
+  app.kubernetes.io/component: power-management
+
+# Namespace (can be overridden)
+namespace: default
+
+# ConfigMap generator for environment-specific settings
+configMapGenerator:
+- name: powercap-env-config
+  env: .env
+  behavior: create
+
+# Patches for different environments
+patchesStrategicMerge:
+- |-
+  apiVersion: apps/v1
+  kind: DaemonSet
+  metadata:
+    name: powercap-manager
+  spec:
+    template:
+      spec:
+        containers:
+        - name: powercap-manager
+          image: your-registry/powercap:latest  # Update for production
+
+# Example patches for different configurations
+patches:
+- target:
+    kind: DaemonSet
+    name: powercap-manager
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/envFrom/0/configMapRef/name
+      value: powercap-config  # Can be changed to powercap-config-mock, etc.
+
+# Images to customize
+images:
+- name: powercap
+  newName: your-registry/powercap
+  newTag: latest

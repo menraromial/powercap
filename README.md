@@ -1,13 +1,21 @@
-# Power Manager for Kubernetes Nodes
+# Power Manager for Kubernetes Nodes with EPEX Integration
 
 ## Overview
-This project is a Kubernetes-based power management tool designed to monitor and control power consumption on cluster nodes using Intel RAPL (Running Average Power Limit) domains. The Power Manager interacts with the Kubernetes API and dynamically adjusts power constraints to optimize energy usage.
+This project is a Kubernetes-based power management tool designed to monitor and control power consumption on cluster nodes using Intel RAPL (Running Average Power Limit) domains. The Power Manager integrates with EPEX market data to dynamically adjust power constraints based on real-time energy market conditions.
+
+## 🆕 New Features
+- **Automatic EPEX data scraping** at midnight every day
+- **Real-time market-based power calculation** using EPEX volume data
+- **Dynamic CSV generation** with daily market data
+- **Rule-of-three power scaling** based on market volumes
+- **Intelligent fallback** to previous day's data if current data is unavailable
 
 ## Features
 - Discovers available RAPL power domains on the system
 - Reads and manages power constraints
-- Configures power limits based on environmental variables
+- Configures power limits based on EPEX market data and environmental variables
 - Integrates with Kubernetes to apply node-specific configurations
+- Automatically generates and updates EPEX data files daily
 - Logs power adjustments for monitoring
 
 ## Requirements
@@ -39,7 +47,40 @@ The application relies on the following environment variables:
 | NODE_NAME           | Kubernetes node name               | (Required)      |
 | MAX_SOURCE         | Maximum power source in µW       | 40000000        |
 | STABILISATION_TIME | Stabilization time in seconds     | 300             |
-| ALPHA              | Adjustment factor                 | 4               |
+| ALPHA              | Adjustment factor (legacy)        | 4               |
+| RAPL_MIN_POWER     | Minimum RAPL power limit in µW   | 10000000        |
+
+## 🔄 EPEX Integration
+
+### How it works
+The power manager now uses real-time EPEX (European Power Exchange) market data to calculate power consumption based on energy market conditions:
+
+1. **Data Collection**: Every day at midnight, the system automatically scrapes EPEX market data for 15-minute intervals
+2. **Power Calculation**: Uses a rule-of-three calculation:
+   ```
+   current_power = (current_volume / max_volume_in_day) × MAX_SOURCE
+   ```
+3. **Dynamic Adjustment**: Power limits are updated every `STABILISATION_TIME` seconds based on the current 15-minute market period
+
+### EPEX Data Format
+The generated CSV files follow this format:
+```csv
+Period,Volume (MWh),Price (€/MWh)
+00:00-00:15,66.3,31.91
+00:15-00:30,65.3,29.39
+```
+
+### Manual EPEX Data Generation
+To manually generate EPEX data for testing:
+```sh
+./powercap test-epex
+```
+
+### Automatic Data Management
+- Files are named `epex_data_YYYY-MM-DD.csv`
+- Generated automatically at 00:00 every day
+- Falls back to previous day's data if current data is unavailable
+- Logs all data generation and loading activities
 | RAPL_MIN_POWER     | Minimum power limit in µW        | 10000000        |
 
 ## Kubernetes Deployment
