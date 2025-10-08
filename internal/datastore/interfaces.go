@@ -35,6 +35,9 @@ type DataStore interface {
 	// GetCurrentData returns the currently loaded data
 	GetCurrentData() []MarketDataPoint
 
+	// GetMaxVolume returns the maximum volume for the current day
+	GetMaxVolume() float64
+
 	// RefreshData refreshes data for the given date
 	RefreshData(ctx context.Context, date time.Time) error
 
@@ -45,7 +48,7 @@ type DataStore interface {
 // PowerCalculator calculates power based on market data
 type PowerCalculator interface {
 	// CalculatePower calculates power for the current time
-	CalculatePower(maxSource float64, currentTime time.Time, data []MarketDataPoint) int64
+	CalculatePower(maxSource float64, maxVolume float64, currentTime time.Time, data []MarketDataPoint) int64
 
 	// GetCurrentPeriod returns the current market period
 	GetCurrentPeriod(currentTime time.Time) string

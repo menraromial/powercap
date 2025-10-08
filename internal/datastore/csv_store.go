@@ -14,6 +14,7 @@ import (
 type CSVDataStore struct {
 	provider    MarketDataProvider
 	currentData []MarketDataPoint
+	maxVolume   float64 // Cached maximum volume for the current day
 	logger      *log.Logger
 }
 
@@ -56,6 +57,7 @@ func (ds *CSVDataStore) LoadData(date time.Time) ([]MarketDataPoint, error) {
 	}
 
 	ds.currentData = data
+	ds.updateMaxVolume(data)
 	return data, nil
 }
 
@@ -66,7 +68,15 @@ func (ds *CSVDataStore) SaveData(date time.Time, data []MarketDataPoint) error {
 	}
 
 	filePath := ds.provider.GetDataPath(date)
-	return ds.saveToCSV(filePath, data)
+	if err := ds.saveToCSV(filePath, data); err != nil {
+		return err
+	}
+
+	// Update internal state after successful save
+	ds.currentData = data
+	ds.updateMaxVolume(data)
+
+	return nil
 }
 
 // GetCurrentData returns the currently loaded data
@@ -74,33 +84,82 @@ func (ds *CSVDataStore) GetCurrentData() []MarketDataPoint {
 	return ds.currentData
 }
 
+// GetMaxVolume returns the cached maximum volume for the current day
+func (ds *CSVDataStore) GetMaxVolume() float64 {
+	return ds.maxVolume
+}
+
 // RefreshData refreshes data for the given date by fetching from provider
 func (ds *CSVDataStore) RefreshData(ctx context.Context, date time.Time) error {
 	if ds.provider == nil {
+		ds.logger.Printf("❌ No market data provider set for refresh operation")
 		return fmt.Errorf("no market data provider set")
 	}
 
-	ds.logger.Printf("Refreshing data for %s using provider %s",
+	ds.logger.Printf("🔄 Refreshing market data for %s using provider '%s'...",
 		date.Format("2006-01-02"), ds.provider.GetName())
 
+	startTime := time.Now()
 	data, err := ds.provider.FetchData(ctx, date)
+	fetchDuration := time.Since(startTime)
+
 	if err != nil {
+		ds.logger.Printf("❌ Failed to fetch data from provider '%s' after %v: %v",
+			ds.provider.GetName(), fetchDuration, err)
 		return fmt.Errorf("failed to fetch data: %w", err)
 	}
 
 	if len(data) == 0 {
+		ds.logger.Printf("❌ No data retrieved from provider '%s'", ds.provider.GetName())
 		return fmt.Errorf("no data retrieved from provider")
 	}
 
-	ds.logger.Printf("Retrieved %d data points", len(data))
+	ds.logger.Printf("✅ Successfully fetched %d data points from '%s' in %v",
+		len(data), ds.provider.GetName(), fetchDuration)
 
+	// Log sample of fetched data
+	if len(data) > 0 {
+		ds.logger.Printf("   📊 Sample fetched data:")
+		sampleCount := 3
+		if len(data) < sampleCount {
+			sampleCount = len(data)
+		}
+		for i := 0; i < sampleCount; i++ {
+			ds.logger.Printf("      %s: %.1f MWh @ %.2f €/MWh",
+				data[i].Period, data[i].Volume, data[i].Price)
+		}
+		if len(data) > sampleCount {
+			ds.logger.Printf("      ... and %d more data points", len(data)-sampleCount)
+		}
+	}
+
+	ds.logger.Printf("💾 Saving fetched data to CSV...")
 	if err := ds.SaveData(date, data); err != nil {
+		ds.logger.Printf("❌ Failed to save data: %v", err)
 		return fmt.Errorf("failed to save data: %w", err)
 	}
 
 	ds.currentData = data
-	ds.logger.Printf("Successfully refreshed data for %s", date.Format("2006-01-02"))
+	ds.updateMaxVolume(data)
+	ds.logger.Printf("✅ Successfully refreshed data for %s", date.Format("2006-01-02"))
 	return nil
+}
+
+// updateMaxVolume calculates and caches the maximum volume from the dataset
+func (ds *CSVDataStore) updateMaxVolume(data []MarketDataPoint) {
+	ds.logger.Printf("📊 Calculating maximum volume from %d data points...", len(data))
+
+	ds.maxVolume = 0.0
+	var maxVolumeTime string
+
+	for _, point := range data {
+		if point.Volume > ds.maxVolume {
+			ds.maxVolume = point.Volume
+			maxVolumeTime = point.Period
+		}
+	}
+
+	ds.logger.Printf("✅ Maximum volume calculated: %.1f MWh at period %s", ds.maxVolume, maxVolumeTime)
 }
 
 // loadFromCSV loads data from a CSV file

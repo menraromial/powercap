@@ -124,15 +124,14 @@ func runFullTest(logger *log.Logger, ctx context.Context) {
 	logger.Println("Calculating power consumption for each time period...")
 	var totalCalculations int
 
-	maxSource := float64(cfg.MaxSource) // Convert from int64 to float64
+	// For testing, use a default max power of 40W (typical CPU TDP)
+	// In production, this comes from RAPL hardware limits
+	maxSource := float64(40000000) // 40W in microwatts
 
-	// Find max volume for rule of three calculation
-	maxVolume := 0.0
-	for _, point := range data {
-		if point.Volume > maxVolume {
-			maxVolume = point.Volume
-		}
-	}
+	// Get max volume from datastore (calculated once during SaveData)
+	maxVolume := ds.GetMaxVolume()
+	logger.Printf("Using max volume: %.1f MWh", maxVolume)
+	logger.Printf("Using test max power: %.1f W", maxSource/1000000)
 
 	for i, point := range data {
 		// Manual calculation since we're testing

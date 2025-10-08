@@ -11,9 +11,7 @@ import (
 // Environment variable names
 const (
 	EnvNodeName          = "NODE_NAME"
-	EnvMaxSource         = "MAX_SOURCE"
 	EnvStabilisationTime = "STABILISATION_TIME"
-	EnvAlpha             = "ALPHA"
 	EnvRaplLimit         = "RAPL_MIN_POWER"
 
 	// Provider configuration
@@ -25,9 +23,7 @@ const (
 
 // Default values
 const (
-	DefaultMaxSource         = "40000000"
 	DefaultStabilisationTime = "300"
-	DefaultAlpha             = "4"
 	DefaultRaplLimit         = "10000000"
 
 	// Provider defaults
@@ -39,8 +35,6 @@ const (
 
 // Config holds the application configuration
 type Config struct {
-	MaxSource         float64
-	Alpha             float64
 	StabilisationTime time.Duration
 	RaplLimit         int64
 	NodeName          string
@@ -61,16 +55,6 @@ func Load() (*Config, error) {
 		nodeName = "local-node"
 	}
 
-	maxSource, err := strconv.ParseFloat(getEnvOrDefault(EnvMaxSource, DefaultMaxSource), 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid max source value: %w", err)
-	}
-
-	alpha, err := strconv.ParseFloat(getEnvOrDefault(EnvAlpha, DefaultAlpha), 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid alpha value: %w", err)
-	}
-
 	stabilisationTime, err := time.ParseDuration(getEnvOrDefault(EnvStabilisationTime, DefaultStabilisationTime) + "s")
 	if err != nil {
 		return nil, fmt.Errorf("invalid stabilisation time: %w", err)
@@ -88,8 +72,6 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		MaxSource:         maxSource,
-		Alpha:             alpha,
 		StabilisationTime: stabilisationTime,
 		RaplLimit:         raplLimit,
 		NodeName:          nodeName,

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: powercap-manager
+  namespace: default
+  labels:
+    app: powercap-manager
+    app.kubernetes.io/name: powercap-manager
+    app.kubernetes.io/version: v1.0.0
+    app.kubernetes.io/component: power-management
+spec:
+  selector:
+    matchLabels:
+      app: powercap-manager
+  template:
+    metadata:
+      labels:
+        app: powercap-manager
+        app.kubernetes.io/name: powercap-manager
+        app.kubernetes.io/version: v1.0.0
+        app.kubernetes.io/component: power-management
+    spec:
+      serviceAccountName: powercap-manager
+      hostNetwork: true
+      hostPID: true
+      # Affinité pour EXCLURE les nœuds master/control-plane
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+              - key: node-role.kubernetes.io/master
+                operator: DoesNotExist
+      containers:
+      - name: powercap-manager
+        image: ghcr.io/menraromial/powercap:latest
+        imagePullPolicy: Always  # Change to Always for production
+        securityContext:
+          privileged: true  # Required for RAPL access
+          runAsUser: 0
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        envFrom:
+        - configMapRef:
+            name: powercap-config  # Default config, can be overridden
+        volumeMounts:
+        - name: rapl
+          mountPath: /sys/devices/virtual/powercap
+          readOnly: false
+        - name: data-storage
+          mountPath: /app/data
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+        livenessProbe:
+          exec:
+            command:
+            - pgrep
+            - -f
+            - powercap
+          initialDelaySeconds: 30
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "test -d /sys/devices/virtual/powercap/intel-rapl && pgrep -f powercap"
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: rapl
+        hostPath:
+          path: /sys/devices/virtual/powercap
+          type: Directory
+      - name: data-storage
+        hostPath:
+          path: /var/lib/powercap  # Host directory for CSV files
+          type: DirectoryOrCreate
+      restartPolicy: Always
+

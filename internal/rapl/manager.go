@@ -43,19 +43,24 @@ func NewManager(logger *log.Logger) *Manager {
 
 // DiscoverDomains finds all RAPL domains and their constraints in the system
 func (m *Manager) DiscoverDomains() error {
+	m.logger.Printf("🔍 Discovering RAPL domains in %s...", RaplBasePath)
 	var domains []Domain
 
 	// List all RAPL domains
 	entries, err := os.ReadDir(RaplBasePath)
 	if err != nil {
+		m.logger.Printf("❌ Failed to read RAPL base path %s: %v", RaplBasePath, err)
 		return fmt.Errorf("failed to read RAPL base path: %w", err)
 	}
+	m.logger.Printf("📁 Found %d entries in RAPL directory", len(entries))
 
 	for _, entry := range entries {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "intel-rapl:") {
+			m.logger.Printf("   ⏭️  Skipping non-RAPL entry: %s", entry.Name())
 			continue
 		}
 
+		m.logger.Printf("⚡ Processing RAPL domain: %s", entry.Name())
 		domain := Domain{
 			ID: entry.Name(),
 		}
@@ -119,11 +124,23 @@ func (m *Manager) DiscoverDomains() error {
 
 		// Only add domains that have constraints
 		if len(domain.Constraints) > 0 || len(domain.ConstraintsMax) > 0 {
+			m.logger.Printf("   ✅ Added domain %s with %d constraints and %d max constraints",
+				domain.ID, len(domain.Constraints), len(domain.ConstraintsMax))
 			domains = append(domains, domain)
+		} else {
+			m.logger.Printf("   ⚠️  Skipped domain %s (no constraints found)", domain.ID)
 		}
 	}
 
 	m.domains = domains
+	m.logger.Printf("✅ Domain discovery completed: found %d valid RAPL domains", len(domains))
+
+	// Log summary of discovered domains
+	for _, domain := range domains {
+		m.logger.Printf("   📊 Domain %s: %d power constraints, %d max constraints",
+			domain.ID, len(domain.Constraints), len(domain.ConstraintsMax))
+	}
+
 	return nil
 }
 
@@ -134,29 +151,49 @@ func (m *Manager) GetDomains() []Domain {
 
 // FindMaxPowerValue finds the maximum power value across all domains and constraints
 func (m *Manager) FindMaxPowerValue() (int64, error) {
+	m.logger.Printf("🔍 Searching for maximum power value across %d RAPL domains...", len(m.domains))
 	var maxPower int64
+	var maxPowerSource string
 
 	for _, domain := range m.domains {
+		m.logger.Printf("   📊 Checking domain %s...", domain.ID)
+
 		// Check Constraints
 		for _, constraint := range domain.Constraints {
 			value, err := strconv.ParseInt(constraint.Value, 10, 64)
 			if err == nil && value > maxPower {
+				m.logger.Printf("      🔋 Found higher power constraint: %d µW (%.1f W) from %s",
+					value, float64(value)/1000000, constraint.Path)
 				maxPower = value
+				maxPowerSource = constraint.Path
+			} else if err != nil {
+				m.logger.Printf("      ⚠️  Invalid constraint value '%s' at %s: %v",
+					constraint.Value, constraint.Path, err)
 			}
 		}
+
 		// Check ConstraintsMax
 		for _, constraint := range domain.ConstraintsMax {
 			value, err := strconv.ParseInt(constraint.Value, 10, 64)
 			if err == nil && value > maxPower {
+				m.logger.Printf("      🔋 Found higher max constraint: %d µW (%.1f W) from %s",
+					value, float64(value)/1000000, constraint.Path)
 				maxPower = value
+				maxPowerSource = constraint.Path
+			} else if err != nil {
+				m.logger.Printf("      ⚠️  Invalid max constraint value '%s' at %s: %v",
+					constraint.Value, constraint.Path, err)
 			}
 		}
 	}
 
 	if maxPower == 0 {
+		m.logger.Printf("❌ No valid max power values found in any RAPL domain")
 		return 0, fmt.Errorf("no valid max power values found")
 	}
 
+	m.logger.Printf("✅ Maximum power value determined: %d µW (%.1f W) from %s",
+		maxPower, float64(maxPower)/1000000, maxPowerSource)
 	return maxPower, nil
 }
 

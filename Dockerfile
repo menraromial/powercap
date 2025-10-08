@@ -54,7 +54,6 @@ ENV NODE_NAME=docker-local-node
 ENV DATA_PROVIDER=epex
 ENV PROVIDER_URL=https://www.epexspot.com/en/market-results
 ENV PROVIDER_PARAMS='{"market_area":"FR","auction":"IDA1","modality":"Auction","sub_modality":"Intraday","data_mode":"table"}'
-ENV MAX_SOURCE=40000000
 ENV STABILISATION_TIME=300
 ENV RAPL_MIN_POWER=10000000
 

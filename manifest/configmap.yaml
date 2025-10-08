@@ -1,0 +1,32 @@
+# ConfigMap for Power Manager configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: powercap-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: powercap-manager
+    app.kubernetes.io/version: v1.0.0
+    app.kubernetes.io/component: power-management
+data:
+  # Power management settings
+  MAX_SOURCE: "100000000"
+  STABILISATION_TIME: "300"
+  ALPHA: "4"
+  RAPL_MIN_POWER: "20000000"
+  
+  # Data provider configuration
+  DATA_PROVIDER: "epex"
+  PROVIDER_URL: "https://www.epexspot.com/en/market-results"
+  DATA_REFRESH_CRON: "0 0 * * *"
+  
+  # Provider parameters (JSON format)
+  PROVIDER_PARAMS: |
+    {
+      "market_area": "FR",
+      "auction": "IDA1",
+      "modality": "Auction",
+      "sub_modality": "Intraday",
+      "data_mode": "table"
+    }
+
