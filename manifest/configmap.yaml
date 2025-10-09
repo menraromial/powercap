@@ -20,6 +20,10 @@ data:
   PROVIDER_URL: "https://www.epexspot.com/en/market-results"
   DATA_REFRESH_CRON: "0 0 * * *"
   
+  # Timezone configuration
+  TZ: "Europe/Paris"
+  TIMEZONE: "Europe/Paris"
+  
   # Provider parameters (JSON format)
   PROVIDER_PARAMS: |
     {

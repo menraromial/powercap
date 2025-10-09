@@ -13,6 +13,7 @@ const (
 	EnvNodeName          = "NODE_NAME"
 	EnvStabilisationTime = "STABILISATION_TIME"
 	EnvRaplLimit         = "RAPL_MIN_POWER"
+	EnvTimezone          = "TIMEZONE"
 
 	// Provider configuration
 	EnvDataProvider    = "DATA_PROVIDER"     // epex, mock, static
@@ -25,6 +26,7 @@ const (
 const (
 	DefaultStabilisationTime = "300"
 	DefaultRaplLimit         = "10000000"
+	DefaultTimezone          = "Europe/Paris"
 
 	// Provider defaults
 	DefaultDataProvider    = "epex"
@@ -38,6 +40,7 @@ type Config struct {
 	StabilisationTime time.Duration
 	RaplLimit         int64
 	NodeName          string
+	Timezone          string // Timezone for time calculations
 
 	// Provider configuration
 	DataProvider    string            // Type of data provider
@@ -75,6 +78,7 @@ func Load() (*Config, error) {
 		StabilisationTime: stabilisationTime,
 		RaplLimit:         raplLimit,
 		NodeName:          nodeName,
+		Timezone:          getEnvOrDefault(EnvTimezone, DefaultTimezone),
 		DataProvider:      getEnvOrDefault(EnvDataProvider, DefaultDataProvider),
 		ProviderURL:       getEnvOrDefault(EnvProviderURL, DefaultProviderURL),
 		ProviderParams:    providerParams,

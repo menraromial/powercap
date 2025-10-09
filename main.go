@@ -17,6 +17,18 @@ func main() {
 	logger := log.New(os.Stdout, "[PowerManager] ", log.LstdFlags|log.Lmicroseconds)
 	logger.Println("Starting professional power management system...")
 
+	// Load configuration first to get timezone
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Set timezone globally for all time operations
+	if err := setTimezone(cfg.Timezone, logger); err != nil {
+		logger.Printf("Warning: Failed to set timezone %s: %v", cfg.Timezone, err)
+		logger.Println("Continuing with system timezone...")
+	}
+
 	// Check for test mode
 	if len(os.Args) > 1 && os.Args[1] == "test-data" {
 		runTestMode(logger)
@@ -166,4 +178,16 @@ func runFullTest(logger *log.Logger, ctx context.Context) {
 	logger.Printf("   - Fetched: %d data points", len(data))
 	logger.Printf("   - Calculated: %d power values", totalCalculations)
 	logger.Printf("   - Generated: %s", filename)
+}
+
+// setTimezone sets the global timezone for the application
+func setTimezone(timezone string, logger *log.Logger) error {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return fmt.Errorf("invalid timezone %s: %w", timezone, err)
+	}
+
+	time.Local = loc
+	logger.Printf("🌍 Timezone set to: %s (current time: %s)", timezone, time.Now().Format("15:04:05 MST"))
+	return nil
 }

@@ -49,6 +49,9 @@ RUN chmod +x /usr/local/bin/powercap
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
     CMD pgrep -f powercap || exit 1
 
+# Set timezone for French operations
+ENV TZ=Europe/Paris
+
 # Default environment variables (can be overridden by Kubernetes)
 ENV NODE_NAME=docker-local-node
 ENV DATA_PROVIDER=epex
@@ -56,6 +59,7 @@ ENV PROVIDER_URL=https://www.epexspot.com/en/market-results
 ENV PROVIDER_PARAMS='{"market_area":"FR","auction":"IDA1","modality":"Auction","sub_modality":"Intraday","data_mode":"table"}'
 ENV STABILISATION_TIME=300
 ENV RAPL_MIN_POWER=10000000
+ENV TIMEZONE=Europe/Paris
 
 # Switch to non-root user (will be overridden to root in Kubernetes for RAPL access)
 USER powercap
