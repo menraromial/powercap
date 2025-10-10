@@ -15,6 +15,7 @@ type CSVDataStore struct {
 	provider    MarketDataProvider
 	currentData []MarketDataPoint
 	maxVolume   float64 // Cached maximum volume for the current day
+	avgVolume   float64 // Cached average volume for the current day
 	logger      *log.Logger
 }
 
@@ -57,7 +58,7 @@ func (ds *CSVDataStore) LoadData(date time.Time) ([]MarketDataPoint, error) {
 	}
 
 	ds.currentData = data
-	ds.updateMaxVolume(data)
+	ds.updateVolumeMetrics(data)
 	return data, nil
 }
 
@@ -74,7 +75,7 @@ func (ds *CSVDataStore) SaveData(date time.Time, data []MarketDataPoint) error {
 
 	// Update internal state after successful save
 	ds.currentData = data
-	ds.updateMaxVolume(data)
+	ds.updateVolumeMetrics(data)
 
 	return nil
 }
@@ -87,6 +88,23 @@ func (ds *CSVDataStore) GetCurrentData() []MarketDataPoint {
 // GetMaxVolume returns the cached maximum volume for the current day
 func (ds *CSVDataStore) GetMaxVolume() float64 {
 	return ds.maxVolume
+}
+
+// GetAvgVolume returns the cached average volume for the current day
+func (ds *CSVDataStore) GetAvgVolume() float64 {
+	return ds.avgVolume
+}
+
+// GetReferenceVolume returns either max or average volume based on mode
+func (ds *CSVDataStore) GetReferenceVolume(mode string) float64 {
+	switch mode {
+	case "average":
+		return ds.avgVolume
+	case "max":
+		fallthrough
+	default:
+		return ds.maxVolume
+	}
 }
 
 // RefreshData refreshes data for the given date by fetching from provider
@@ -140,26 +158,34 @@ func (ds *CSVDataStore) RefreshData(ctx context.Context, date time.Time) error {
 	}
 
 	ds.currentData = data
-	ds.updateMaxVolume(data)
+	ds.updateVolumeMetrics(data)
 	ds.logger.Printf("✅ Successfully refreshed data for %s", date.Format("2006-01-02"))
 	return nil
 }
 
-// updateMaxVolume calculates and caches the maximum volume from the dataset
-func (ds *CSVDataStore) updateMaxVolume(data []MarketDataPoint) {
-	ds.logger.Printf("📊 Calculating maximum volume from %d data points...", len(data))
+// updateVolumeMetrics calculates and caches the maximum and average volume from the dataset
+func (ds *CSVDataStore) updateVolumeMetrics(data []MarketDataPoint) {
+	ds.logger.Printf("📊 Calculating volume metrics from %d data points...", len(data))
 
 	ds.maxVolume = 0.0
+	ds.avgVolume = 0.0
 	var maxVolumeTime string
+	var totalVolume float64
 
 	for _, point := range data {
+		totalVolume += point.Volume
 		if point.Volume > ds.maxVolume {
 			ds.maxVolume = point.Volume
 			maxVolumeTime = point.Period
 		}
 	}
 
+	if len(data) > 0 {
+		ds.avgVolume = totalVolume / float64(len(data))
+	}
+
 	ds.logger.Printf("✅ Maximum volume calculated: %.1f MWh at period %s", ds.maxVolume, maxVolumeTime)
+	ds.logger.Printf("📊 Average volume calculated: %.1f MWh", ds.avgVolume)
 }
 
 // loadFromCSV loads data from a CSV file

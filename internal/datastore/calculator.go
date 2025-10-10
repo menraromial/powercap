@@ -15,7 +15,7 @@ func NewMarketBasedCalculator() *MarketBasedCalculator {
 }
 
 // CalculatePower calculates power using rule of three based on market volumes
-func (calc *MarketBasedCalculator) CalculatePower(maxSource float64, maxVolume float64, currentTime time.Time, data []MarketDataPoint) int64 {
+func (calc *MarketBasedCalculator) CalculatePower(maxSource float64, referenceVolume float64, currentTime time.Time, data []MarketDataPoint) int64 {
 	currentPeriod := calc.GetCurrentPeriod(currentTime)
 
 	// Find current period data
@@ -32,13 +32,13 @@ func (calc *MarketBasedCalculator) CalculatePower(maxSource float64, maxVolume f
 		return 0
 	}
 
-	// Apply rule of three: if MaxSource corresponds to maxVolume, what corresponds to currentVolume?
-	// maxVolume is now pre-calculated and passed as parameter (calculated once per day)
-	if maxVolume == 0 {
+	// Apply rule of three: if maxSource corresponds to referenceVolume, what corresponds to currentVolume?
+	// referenceVolume can be either maxVolume or avgVolume depending on configuration
+	if referenceVolume == 0 {
 		return 0
 	}
 
-	power := (currentVolume / maxVolume) * maxSource
+	power := (currentVolume / referenceVolume) * maxSource
 	return int64(math.Round(power))
 }
 
